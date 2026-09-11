@@ -1,0 +1,33 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "celery>=5.6.3",
+    "datasets>=5.0.1",
+    "django-celery-beat>=2.9.0",
+    "django-cors-headers>=4.9.0",
+    "djangorestframework>=3.18.1",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.1",
+    "python-dotenv>=1.2.3",
+    "redis>=8.1.0",
+    "requests>=2.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-django>=4.11.1",
+    "freezegun>=1.5.5",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "llm_picker_backend.settings"
+python_files = ["test_*.py"]
+testpaths = ["leaderboard/tests"]
+# `--create-db` is deliberately absent: the suite runs against a throwaway test
+# database and never touches `db.sqlite3`.
+addopts = "-ra --strict-markers"
