@@ -1,0 +1,27 @@
+ 
+ -------------- celery@toothlessos-ASUS-TUF-Gaming-A15-FA507XV-FA507XV v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-7.0.0-31-generic-x86_64-with-glibc2.43 2026-09-11 12:00:40
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         llm_picker_backend:0x7e4586e1b770
+- ** ---------- .> transport:   redis://127.0.0.1:6379/0
+- ** ---------- .> results:     redis://127.0.0.1:6379/1
+- *** --- * --- .> concurrency: 16 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . leaderboard.refresh_aa
+  . leaderboard.refresh_all
+  . leaderboard.refresh_lmarena
+
+[2026-09-11 12:00:41,183: INFO/MainProcess] Connected to redis://127.0.0.1:6379/0
+[2026-09-11 12:00:41,185: INFO/MainProcess] mingle: searching for neighbors
+[2026-09-11 12:00:42,191: INFO/MainProcess] mingle: all alone
+[2026-09-11 12:00:42,198: INFO/MainProcess] celery@toothlessos-ASUS-TUF-Gaming-A15-FA507XV-FA507XV ready.
+
+worker: Warm shutdown (MainProcess)
