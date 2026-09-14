@@ -1,0 +1,33 @@
+.app-shell {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(32px, 8vw, 96px);
+  border-top: 4px solid #287271;
+  box-sizing: border-box;
+}
+
+.product-label,
+.status {
+  margin: 0;
+}
+
+.product-label {
+  color: #287271;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.app-shell h1 {
+  margin: 12px 0;
+  font-size: clamp(2.5rem, 7vw, 5rem);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.status {
+  color: #5b6470;
+  font-size: 1rem;
+}
