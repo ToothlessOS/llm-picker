@@ -15,14 +15,17 @@ is `test_refresh.py`):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import OperationalError
+from django.db.models import F
 
+from leaderboard import persistence as store
 from leaderboard.constants import Source, SyncStatus, UnmatchedReason
 from leaderboard.models import LMArenaEntry, SyncRun, UnmatchedRecord
 from leaderboard.services import refresh
@@ -488,3 +491,271 @@ class TestTaskEntryPoints:
         run = SyncRun.objects.get(source=Source.LMARENA.value)
 
         assert run.triggered_by == "celery:manual"
+
+
+# --------------------------------------------------------------------------- #
+# `refresh_if_stale`
+# --------------------------------------------------------------------------- #
+
+#: Comfortably past the 14 h default threshold.
+OLD = 20 * 3600
+
+STARTUP = "cli:startup"
+
+
+def age_the_data(seconds: int = OLD) -> None:
+    """Make the *stored data* look old, leaving the last attempt looking recent.
+
+    The two are different things and the command distinguishes them: age lives
+    on `finished_at` (when a source last produced good data), while the cooldown
+    reads `started_at` (when anyone last tried). Splitting them is what lets a
+    test construct "stale, but somebody tried a moment ago".
+    """
+    SyncRun.objects.filter(dry_run=False).update(
+        finished_at=F("finished_at") - timedelta(seconds=seconds)
+    )
+
+
+def age_the_attempt(seconds: int = OLD) -> None:
+    SyncRun.objects.filter(dry_run=False).update(
+        started_at=F("started_at") - timedelta(seconds=seconds)
+    )
+
+
+def startup_runs():
+    """Real startup refreshes -- a rehearsal is recorded too, and is not one."""
+    return SyncRun.objects.filter(triggered_by=STARTUP, dry_run=False)
+
+
+@pytest.mark.django_db
+class TestRefreshIfStale:
+    """The launch-time freshness check.
+
+    Exists because the twice-daily schedule presumes beat and a worker are always
+    up, which on a development machine they are not -- so `runserver` happily
+    serves data nobody has refreshed in days.
+    """
+
+    def test_fresh_data_is_left_alone(self, capsys, wired):
+        seed()
+        before = SyncRun.objects.count()
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert "Data is fresh" in capsys.readouterr().out
+        assert SyncRun.objects.count() == before
+
+    def test_stale_data_is_refreshed_on_launch(self, capsys, wired):
+        seed()
+        age_the_data()
+        age_the_attempt()
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert startup_runs().count() == 2
+        assert "Refreshing both sources" in capsys.readouterr().out
+
+    def test_the_refresh_is_attributed_to_the_launch(self, wired):
+        """`triggered_by` is the first question asked about an unexpected
+        refresh, and 'why did the data change at 2am' has a different answer for
+        beat, for a human, and for a start script."""
+        seed()
+        age_the_data()
+        age_the_attempt()
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert set(startup_runs().values_list("source", flat=True)) == {
+            Source.LMARENA.value,
+            Source.ARTIFICIAL_ANALYSIS.value,
+        }
+
+    def test_an_empty_database_counts_as_stale(self, capsys, wired):
+        """Never refreshed and too old are the same state: in both, there is
+        nothing worth serving. This is the cold-clone case -- `migrate` then
+        straight to `runserver`."""
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert LMArenaEntry.objects.count() > 0
+        assert "never refreshed" in capsys.readouterr().out
+
+    def test_the_cooldown_holds_off_a_restart_loop(self, capsys, wired):
+        """Stale data plus a *recent* attempt means the last try failed. Trying
+        again seconds later is unlikely to help, and each AA attempt can spend 4
+        of the 100 requests shared across the whole organization per day."""
+        seed()
+        age_the_data()
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        out = capsys.readouterr().out
+        assert "cooldown" in out
+        assert startup_runs().count() == 0
+
+    def test_force_overrides_both_gates(self, capsys, wired):
+        """Fresh data *and* a recent attempt -- the only way through is to say so."""
+        seed()
+
+        call_command("refresh_if_stale", "--force", "--no-lock")
+
+        assert startup_runs().count() == 2
+
+    def test_check_reports_without_touching_anything(self, capsys, wired):
+        seed()
+        age_the_data()
+        age_the_attempt()
+        before = SyncRun.objects.count()
+
+        call_command("refresh_if_stale", "--check")
+
+        out = capsys.readouterr().out
+        assert "STALE" in out
+        assert "--check: nothing was refreshed" in out
+        assert SyncRun.objects.count() == before
+
+    def test_a_failed_refresh_does_not_stop_a_launch(self, monkeypatch, capsys, wired):
+        """The API is built to serve the last good data when a source is down, so
+        a launch script must not be blocked by one. `call_command` returning
+        without raising *is* the exit-0 assertion -- a CommandError here would be
+        a non-zero exit for a shell."""
+        seed()
+        age_the_data()
+        age_the_attempt()
+        monkeypatch.setattr(
+            refresh,
+            "build_lmarena_client",
+            lambda **kw: lmarena_client(agent=RuntimeError("the Hub is down")),
+        )
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        out = capsys.readouterr().out
+        assert "FAILED" in out
+        assert "keeps serving the last good data" in out
+
+    def test_strict_turns_a_failed_refresh_into_a_failed_launch(self, monkeypatch, wired):
+        """The opt-in for a script that would rather not start at all than serve
+        data it knows is out of date."""
+        seed()
+        age_the_data()
+        age_the_attempt()
+        monkeypatch.setattr(
+            refresh,
+            "build_lmarena_client",
+            lambda **kw: lmarena_client(agent=RuntimeError("the Hub is down")),
+        )
+
+        with pytest.raises(CommandError, match="keeps serving the last good data"):
+            call_command("refresh_if_stale", "--strict", "--no-lock")
+
+    def test_an_unmigrated_database_is_not_fatal(self, monkeypatch, capsys):
+        """A start script may run this before `migrate`. An unhandled
+        `OperationalError` there would be a confusing way to learn that."""
+        from django.db import connection
+
+        monkeypatch.setattr(connection.introspection, "table_names", lambda: [])
+
+        call_command("refresh_if_stale")
+
+        assert "migrate" in capsys.readouterr().out
+
+    def test_a_dry_run_rehearses_without_recording_a_success(self, capsys, wired):
+        """A rehearsal must not make the board look fresh -- that is the one thing
+        a dry run could plausibly break, and the check `--dry-run` exists to
+        protect."""
+        call_command("refresh_if_stale", "--dry-run", "--no-lock")
+
+        assert LMArenaEntry.objects.count() == 0
+        assert store.last_success_at(Source.LMARENA.value) is None
+
+    def test_a_crash_in_the_pipeline_does_not_stop_a_launch(self, monkeypatch, capsys, wired):
+        """`refresh_lmarena` and `refresh_aa` promise never to raise, but that
+        promise begins *inside* their per-source `try`: the stale-run reaper and
+        the run claim execute before it, so a locked or corrupt database escapes
+        both of them and lands here. A launch script must survive that too, or
+        the documented contract holds for every failure except the likely ones.
+        """
+        seed()
+        age_the_data()
+        age_the_attempt()
+
+        def explode(**kwargs):
+            raise OperationalError("database is locked")
+
+        monkeypatch.setattr(refresh, "refresh_all", explode)
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        out = capsys.readouterr().out
+        assert "failed before it could run" in out
+        assert "startup refresh: failed" in out
+
+    def test_strict_also_covers_a_crash(self, monkeypatch, wired):
+        seed()
+        age_the_data()
+        age_the_attempt()
+        monkeypatch.setattr(
+            refresh, "refresh_all", lambda **kw: (_ for _ in ()).throw(OperationalError("locked"))
+        )
+
+        with pytest.raises(CommandError, match="failed before it could run"):
+            call_command("refresh_if_stale", "--strict", "--no-lock")
+
+    def test_a_rehearsal_does_not_reset_the_cooldown(self, capsys, wired):
+        """A `--dry-run` writes a `SyncRun`, so it is an attempt as far as the
+        table is concerned. If the cooldown counted it, rehearsing a refresh
+        would silence the real one for half an hour -- the same class of bug as
+        letting a dry run count as a success, which `--dry-run` documentation
+        already calls out."""
+        seed()
+        age_the_data()
+        age_the_attempt()
+
+        call_command("refresh_if_stale", "--dry-run", "--no-lock")
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert startup_runs().count() == 2
+
+    def test_the_source_flag_is_not_offered(self, wired):
+        """The stale check decides scope, and it always decides `all`: AA
+        retention and matching read the agent set LMArena writes, so a
+        source-filtered startup refresh could retain nothing on a cold database.
+        `refresh_leaderboard --source=` remains for the deliberate case."""
+        with pytest.raises(CommandError, match="unrecognized arguments"):
+            call_command("refresh_if_stale", "--source=lmarena")
+
+    def test_every_outcome_says_which_it_was(self, capsys, wired):
+        """A start-script log is read by `grep`. Without a verdict line, "skipped
+        because another run held the lock" and "never ran at all" look alike."""
+        seed()
+
+        call_command("refresh_if_stale", "--no-lock")
+
+        assert "startup refresh: fresh" in capsys.readouterr().out
+
+    def test_a_skipped_run_is_not_reported_as_a_refresh(self, capsys, wired):
+        from leaderboard.locking import run_lock
+
+        seed()
+        age_the_data()
+        age_the_attempt()
+
+        # No `--no-lock`: the point is that the command *tries* and is refused.
+        with run_lock(refresh.ALL_SOURCES_LOCK):
+            call_command("refresh_if_stale")
+
+        out = capsys.readouterr().out
+        assert "SKIPPED" in out
+        assert "startup refresh: skipped" in out
+
+    def test_the_stale_threshold_is_the_one_the_api_reports(self, capsys, wired):
+        """If the command and `/metadata/` disagreed, the API would show
+        `is_stale: false` on a board this command considers overdue."""
+        from leaderboard.constants import stale_after_seconds
+
+        seed()
+
+        call_command("refresh_if_stale", "--check")
+
+        hours = stale_after_seconds() // 3600
+        assert f"Staleness threshold: {hours}h" in capsys.readouterr().out

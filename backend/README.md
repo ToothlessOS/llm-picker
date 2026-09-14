@@ -48,8 +48,18 @@ uv run celery -A llm_picker_backend worker -l info              # executes refre
 uv run celery -A llm_picker_backend beat   -l info              # schedules them
 ```
 
-Beat is only needed for the automatic twice-daily refresh; `runserver` plus a
-manual `refresh_leaderboard` is enough to develop against.
+Beat is only needed for the automatic twice-daily refresh. Without it, nothing
+refreshes on a schedule — which is the normal state of a dev machine, where
+`runserver` is the only process up and the board quietly ages. Put
+`refresh_if_stale` in front of the server instead:
+
+```bash
+uv run python manage.py refresh_if_stale    # fetches only if the data has aged out
+uv run python manage.py runserver
+```
+
+It exits 0 whether the data was fresh, refreshed, skipped or the refresh failed,
+so it never blocks a launch — the API serves the last good data either way.
 
 ---
 
@@ -62,6 +72,13 @@ uv run python manage.py refresh_leaderboard --source=all
 uv run python manage.py refresh_leaderboard --source=artificial_analysis
 uv run python manage.py refresh_leaderboard --source=lmarena --dry-run
 uv run python manage.py refresh_leaderboard --source=all --dry-run --no-lock
+
+# Launch-time. Refreshes both sources only if the stored data has aged past
+# LEADERBOARD_STALE_AFTER_SECONDS, and only if no attempt was made within the
+# cooldown. `--check` reports without fetching; `--force` ignores both gates;
+# `--strict` exits non-zero if a refresh was attempted and failed.
+uv run python manage.py refresh_if_stale
+uv run python manage.py refresh_if_stale --check
 
 # Review what did not join. See docs/unmatched-report.md for the workflow.
 uv run python manage.py report_unmatched
@@ -122,8 +139,13 @@ full set. The ones that matter:
 | `DJANGO_DEBUG` | `true` | `true` also allows any localhost dev port through CORS. |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Broker `/0`, results `/1`, lock cache `/2`. |
 | `CELERY_TIMEZONE` | `Asia/Shanghai` | Must be a **real IANA zone** — see below. |
-| `LEADERBOARD_STALE_AFTER_SECONDS` | `50400` (14 h) | Twice the 12 h schedule, so one missed run is not an alarm. |
+| `LEADERBOARD_STALE_AFTER_SECONDS` | `50400` (14 h) | Twice the 12 h schedule, so one missed run is not an alarm. Shared by `/metadata/` and `refresh_if_stale`. |
 | `LEADERBOARD_ENABLE_HARNESS_FOLD` | `true` | The one inferred join in the ladder. |
+| `LEADERBOARD_STARTUP_REFRESH_COOLDOWN_SECONDS` | `1800` (30 min) | Minimum gap between `refresh_if_stale` attempts, whatever the previous one's outcome. Protects the shared AA quota from a restart loop. |
+| `LEADERBOARD_THROTTLE_ENABLED` | `true` | Master switch for the API's rate limit. |
+| `LEADERBOARD_THROTTLE_BURST` | `60/min` | Per-IP burst ceiling. |
+| `LEADERBOARD_THROTTLE_SUSTAINED` | `2000/day` | Per-IP daily ceiling. |
+| `DJANGO_NUM_PROXIES` | `0` | **Security setting.** `0` ignores `X-Forwarded-For` and uses the socket peer. See below. |
 
 ### ⚠️ `CELERY_TIMEZONE` must be a valid IANA zone
 
@@ -149,6 +171,30 @@ of 43 agent models. A real-but-unmatched model is a `404 model_incomplete` with
 the reason in the body — an expected state, not an error to escalate. Every
 excluded row stays reachable through `/categories/{category}/`,
 `/artificial-analysis/` and `/unmatched/`.
+
+### Rate limiting
+
+Since this is meant to be a free public API, every endpoint is limited per client
+IP: **60 requests/minute** and **2000 requests/day**, both enforced, both
+configurable (`LEADERBOARD_THROTTLE_BURST` / `LEADERBOARD_THROTTLE_SUSTAINED`).
+Exceeding either returns `429` with the usual `{"error": "throttled", ...}` body
+and a `Retry-After` header.
+
+Two properties are worth knowing before changing anything here:
+
+* **It fails open.** The counters live in Redis, but the data does not — every
+  response is served from SQLite. If the cache is unreachable the request is
+  served *uncounted* and a warning is logged, because trading a total outage for
+  a lost rate limit is the wrong way round. (The refresh lock degrades the same
+  way, for the same reason.)
+* **It does not trust `X-Forwarded-For` by default.** That header is client-
+  writable, so believing it with no proxy in front would let anyone mint a new
+  identity per request and never be counted — which is DRF's own default
+  behaviour. `DJANGO_NUM_PROXIES=0` means "use the socket peer". Raise it to the
+  number of proxies you control *only* once one is actually deployed.
+
+A malformed rate is caught by `manage.py check` at boot, not by a 500 per request
+— see `leaderboard/checks.py`.
 
 Full reference: **[docs/api.md](docs/api.md)** — start there for frontend work.
 

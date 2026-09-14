@@ -40,3 +40,17 @@ class LeaderboardConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "leaderboard"
     verbose_name = "Leaderboard"
+
+    def ready(self) -> None:
+        """Register the system checks.
+
+        Django does **not** discover an app's `checks.py` on its own, despite the
+        convention -- an app has to import it, and `ready()` is the documented
+        place. Imported for the side effect only; the module registers itself
+        with `@register()` on import.
+
+        This is not the database work the module docstring above rules out for
+        `ready()`: it imports settings-reading code and nothing else, so the app
+        registry is still free of database access at this point.
+        """
+        from . import checks  # noqa: F401 -- imported for its registration side effect
