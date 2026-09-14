@@ -38,7 +38,7 @@ async function decodeJson(response: Response, url: string): Promise<unknown> {
 
 export function createApiClient({
   baseUrl = API_BASE_URL,
-  fetchImpl = globalThis.fetch.bind(globalThis),
+  fetchImpl,
 }: CreateApiClientOptions = {}): ApiClient {
   const normalizedBaseUrl = normalizeApiBaseUrl(baseUrl)
 
@@ -55,7 +55,8 @@ export function createApiClient({
 
       let response: Response
       try {
-        response = await fetchImpl(url, {
+        const request = fetchImpl ?? globalThis.fetch.bind(globalThis)
+        response = await request(url, {
           headers: { Accept: 'application/json' },
           method: 'GET',
           signal: options.signal,

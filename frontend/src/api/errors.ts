@@ -5,6 +5,7 @@ export type KnownApiErrorCode =
   | 'model_incomplete'
   | 'not_found'
   | 'server_error'
+  | 'throttled'
   | 'unknown_value'
 
 export interface ApiErrorBody {
