@@ -165,6 +165,28 @@ value is echoed back, so always read `page_size` from the response).
   block, plus any endpoint-specific keys (`categories_included`, `metric_kind`,
   …).
 
+### Rate limits
+
+Every endpoint is limited per client IP, and a request must satisfy **both**
+budgets:
+
+| Scope | Default | Env var |
+|---|---|---|
+| Burst | 60 requests / minute | `LEADERBOARD_THROTTLE_BURST` |
+| Sustained | 2000 requests / day | `LEADERBOARD_THROTTLE_SUSTAINED` |
+
+Both counters are per IP, so one client cannot spend another's budget. Exceeding
+either returns `429` — see [Errors](#errors) — with a `Retry-After` header giving
+the whole seconds to wait. A page load that fetches a handful of endpoints is far
+inside both budgets; a polling loop will meet the burst limit first.
+
+What costs nothing: **CORS preflights**. An `OPTIONS` carrying
+`Access-Control-Request-Method` is answered by the CORS middleware before any
+view runs, so it is never counted. Everything else the server routes is counted —
+including a bare `OPTIONS` without that header, and `HEAD`, which both reach the
+view. A monitor polling with `HEAD` therefore spends the budget like any other
+caller. (`/admin/` is session-authenticated and entirely outside this limiter.)
+
 ### Field origin markers
 
 Every field below is tagged, so you know which side of the join you are reading
@@ -792,6 +814,7 @@ prose.
 | 404 | `model_incomplete` | The model exists but is excluded by the completeness rule. **Expected, not an error.** |
 | 404 | `not_found` | No such key / page out of range. |
 | 405 | `method_not_allowed` | Non-`GET`. |
+| 429 | `throttled` | The per-IP rate limit was exceeded. Carries a `Retry-After` header. |
 | 500 | `server_error` | |
 
 ```json
@@ -801,6 +824,29 @@ prose.
 
 Use `allowed` to render a message or correct the request; do not hard-code these
 lists — they come from the server so they cannot drift.
+
+`429` is the one error whose body nests, and the only one with a header worth
+reading:
+
+```json
+{"error": "throttled",
+ "detail": {"detail": "Request was throttled. Expected available in 42 seconds."}}
+```
+
+```
+Retry-After: 42
+```
+
+`detail` is an **object** here, not a string — DRF raises the throttle as a
+plain-detail exception, and every such exception is preserved under `detail` by
+the same rule described above. Branch on `error`, and read the wait from the
+`Retry-After` header rather than from the prose: the header is the contract, and
+a client that parses the sentence breaks the day the wording changes.
+
+`Retry-After` is sent on every 429 in practice, but it is **absent in one
+narrow case** — if the configured rate was lowered while requests were already
+counted, DRF can no longer compute a wait and omits the header rather than
+inventing one. Treat its absence as "wait, duration unknown", not as zero.
 
 ---
 

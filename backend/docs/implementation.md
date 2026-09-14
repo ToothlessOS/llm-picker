@@ -163,6 +163,31 @@ holds even if the cache is unavailable. `reap_stale_running()` fails `running`
 rows older than 6 h so a SIGKILLed worker cannot strand one and block every
 future refresh.
 
+### The schedule presumes a machine that is always on
+
+Which a development machine is not. With only `runserver` up, nothing refreshes
+and the board silently ages past any threshold, so `refresh_if_stale` exists to
+be run ahead of the server in a start script. It is deliberately a **command,
+not a startup hook**: an `AppConfig.ready()` handler or a `runserver` override
+would fire inside `migrate`, `shell` and every test run, and would put a network
+fetch on the import path of the process that is supposed to be unable to reach
+the network.
+
+Its staleness test is `last_success_at` against `stale_after_seconds()` — the
+same two helpers `/metadata/` uses, so the command and the API can never disagree
+about what "stale" means. On top of that sits a cooldown measured from the last
+*attempt* rather than the last success: without it, a refresh that fails would be
+re-attempted on every boot of a crash-looping or file-watching process, and each
+AA attempt can spend 4 of the 100 requests shared across the whole organization
+per day. The two gates answer different questions — "is the data old?" and "have
+we already tried recently?" — and `_quota_exhausted()` inside the AA phase is a
+third, independent one.
+
+A failed refresh exits 0. The API is built to serve the last good data with
+`is_stale: true` when a source is down, so blocking a launch on a failed fetch
+would defeat the property the whole read path is designed around; `--strict` is
+the opt-in for the opposite preference.
+
 ### The timezone bug that had to be fixed first
 
 The scaffold shipped `CELERY_TIMEZONE = "China/Shanghai"`, which is **not a valid
@@ -200,6 +225,43 @@ API can observe a half-written state while the worker writes — a real concern
 here, not a theoretical one.
 
 ---
+
+## Inbound rate limiting
+
+DRF's own throttling, cache-backed, two stacked budgets per client IP
+(`DEFAULT_THROTTLE_CLASSES` in `REST_FRAMEWORK`). Nothing new was added to the
+dependency list, and the 429 body needed no code at all: `errors.py` already
+mapped 429 to `{"error": "throttled", ...}`, and DRF already emits `Retry-After`
+from the exception's `wait`.
+
+Three decisions are worth the space they take:
+
+**It fails open.** `allow_request` catches a cache-backend failure and returns
+allow, logging a warning — the same stance `locking.py` takes for the refresh
+lock, and for the same reason. Every response here is served from SQLite; Redis
+holds only the counters. Letting a Redis outage 500 the API would trade a total
+outage for a lost rate limit, which is strictly worse than the problem it solves.
+
+**`NUM_PROXIES` is pinned to 0.** DRF's default is `None`, under which
+`get_ident` returns `X-Forwarded-For` verbatim whenever the header is present.
+Since any client can write that header, the default configuration is one a
+determined caller escapes by sending a different value per request — a rate
+limit that looks present in the config and is absent in practice. `0` uses the
+socket peer, which is correct while nothing sits in front of the app.
+
+**The rates and the kill switch are read per request.** DRF binds
+`APIView.throttle_classes = api_settings.DEFAULT_THROTTLE_CLASSES` when
+`rest_framework.views` is first imported, and `SimpleRateThrottle` binds
+`THROTTLE_RATES` the same way, so a value consulted at import could never be
+overridden — `LEADERBOARD_THROTTLE_ENABLED` would be a setting that does nothing
+once the module is loaded. `get_rate()` therefore reads `api_settings` on every
+call, which is also what makes the limits testable without a 61-request test.
+
+The gap that leaves is a malformed rate string: `parse_rate` runs inside the
+throttle's constructor, *outside* the fail-open guard, so a typo would be a 500
+on every request. `leaderboard/checks.py` closes it at boot, where the codebase
+already prefers this class of failure to surface (`CELERY_TIMEZONE` is the same
+argument).
 
 ## Testing
 

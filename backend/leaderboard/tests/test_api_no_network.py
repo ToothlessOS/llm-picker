@@ -126,6 +126,7 @@ class TestNoNetwork:
         import leaderboard.api.params as params
         import leaderboard.api.selectors as selectors
         import leaderboard.api.serializers as serializers
+        import leaderboard.api.throttling as throttling
         import leaderboard.api.urls as urls
         import leaderboard.api.views as views
 
@@ -137,7 +138,16 @@ class TestNoNetwork:
             "locking",
             "import datasets",
         )
-        for module in (views, selectors, serializers, params, errors, pagination, urls):
+        for module in (
+            views,
+            selectors,
+            serializers,
+            params,
+            errors,
+            pagination,
+            throttling,
+            urls,
+        ):
             with open(module.__file__) as handle:
                 text = handle.read()
             for needle in forbidden:

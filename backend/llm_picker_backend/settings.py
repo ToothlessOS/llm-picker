@@ -202,6 +202,20 @@ CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": f"{REDIS_URL}/2",
+        "OPTIONS": {
+            # Bound every Redis round trip. The rate limiter reads this cache on
+            # the *read path*, and its fail-open guard can only catch an error --
+            # against a black-holed Redis (packets dropped rather than refused)
+            # redis-py would block until the OS gave up, so the guard would never
+            # run and every request would hang. A timeout converts that into the
+            # exception the guard expects.
+            #
+            # The refresh lock shares this backend and degrades to "acquired" when
+            # it raises, which is its documented preference: losing a lock beats
+            # hanging a worker.
+            "socket_timeout": 1.0,
+            "socket_connect_timeout": 1.0,
+        },
     }
 }
 
@@ -223,6 +237,39 @@ if DEBUG:
 
 CORS_ALLOW_CREDENTIALS = False
 
+# `Retry-After` is not a CORS-safelisted response header, so without this the
+# browser receives the 429 but cannot read how long to wait -- which is the one
+# piece of information the error exists to carry. Exposed by name rather than
+# with `CORS_ALLOW_ALL_HEADERS`, so the set stays reviewable.
+CORS_EXPOSE_HEADERS = ["Retry-After"]
+
+
+# --------------------------------------------------------------------------- #
+# Inbound rate limiting -- the API is free and public, so it needs a ceiling
+# --------------------------------------------------------------------------- #
+
+#: Master switch. Read per request by `api/throttling.py`, not here -- DRF binds
+#: `APIView.throttle_classes` at import time, so a setting consulted only at
+#: startup could not be flipped without re-importing the view module.
+LEADERBOARD_THROTTLE_ENABLED = env_bool("LEADERBOARD_THROTTLE_ENABLED", True)
+
+#: Two stacked per-IP budgets, both enforced: a short burst ceiling that stops a
+#: runaway loop, and a daily ceiling that stops a slow scrape. Syntax is DRF's
+#: `count/period`, where the period is one of s, m, h, d. Validated at boot by
+#: `leaderboard/checks.py` -- a malformed value here would otherwise surface as a
+#: 500 on every request rather than as a failed startup.
+LEADERBOARD_THROTTLE_BURST = env("LEADERBOARD_THROTTLE_BURST", "60/min")
+LEADERBOARD_THROTTLE_SUSTAINED = env("LEADERBOARD_THROTTLE_SUSTAINED", "2000/day")
+
+#: How many reverse proxies sit in front of the app. **This is a security
+#: setting, not a tuning knob.** DRF's own default is `None`, under which
+#: `get_ident` trusts `X-Forwarded-For` verbatim whenever the header is present --
+#: so a client could send a different fabricated value per request and never be
+#: throttled at all. `0` means "ignore the header, use the socket peer", which is
+#: correct while the app is reached directly. Raise it to the number of proxies
+#: you actually control once one is deployed, never before.
+DJANGO_NUM_PROXIES = env_int("DJANGO_NUM_PROXIES", 0)
+
 
 # --------------------------------------------------------------------------- #
 # Django REST Framework
@@ -234,6 +281,18 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "leaderboard.api.pagination.LeaderboardPagination",
     "PAGE_SIZE": 50,
     "EXCEPTION_HANDLER": "leaderboard.api.errors.leaderboard_exception_handler",
+    # Every request must satisfy both budgets. The classes are always listed;
+    # `LEADERBOARD_THROTTLE_ENABLED` is enforced inside them, because this list
+    # is bound onto `APIView` at import and could not be changed afterwards.
+    "DEFAULT_THROTTLE_CLASSES": [
+        "leaderboard.api.throttling.BurstThrottle",
+        "leaderboard.api.throttling.SustainedThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "burst": LEADERBOARD_THROTTLE_BURST,
+        "sustained": LEADERBOARD_THROTTLE_SUSTAINED,
+    },
+    "NUM_PROXIES": DJANGO_NUM_PROXIES,
 }
 
 
@@ -298,6 +357,17 @@ LEADERBOARD_ENABLE_HARNESS_FOLD = env_bool("LEADERBOARD_ENABLE_HARNESS_FOLD", Tr
 #: How long a source may go unrefreshed before `/metadata/` reports it stale.
 #: The schedule runs twice daily, so 14 hours tolerates one missed run.
 LEADERBOARD_STALE_AFTER_SECONDS = env_int("LEADERBOARD_STALE_AFTER_SECONDS", 14 * 3600)
+
+#: How long `refresh_if_stale` waits after the last *attempt* before it will try
+#: again, whatever that attempt's outcome. The staleness check alone is not
+#: enough on a launch path: a refresh that just failed is unlikely to succeed
+#: seconds later, and a restart loop (a crash, a file watcher, a script in a
+#: `while` loop) would otherwise re-attempt on every boot -- each AA attempt
+#: costing up to 4 of the 100 requests shared across the whole organization per
+#: day. `refresh_if_stale --force` ignores it. Set to 0 to disable.
+LEADERBOARD_STARTUP_REFRESH_COOLDOWN_SECONDS = env_int(
+    "LEADERBOARD_STARTUP_REFRESH_COOLDOWN_SECONDS", 30 * 60
+)
 
 #: The LMArena dataset this project ingests. Overridable so a test or a pinned
 #: deployment can point at a specific revision.
