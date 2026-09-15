@@ -17,6 +17,8 @@
   --color-info-soft: #e8f0f8;
   --color-warning: #8b5e06;
   --color-warning-soft: #fff5d8;
+  --color-warning-text: #6e4b08;
+  --color-warning-border: #ead397;
   --color-danger: #a33b3b;
   --color-danger-soft: #fbeaea;
   --shadow-header: none;
@@ -52,6 +54,8 @@
   --color-tile-hover-fg: #141c1b;
   --color-info-soft: #1a2838;
   --color-warning-soft: #3a2f14;
+  --color-warning-text: #f3e09a;
+  --color-warning-border: #6a5820;
   --color-danger-soft: #3a2222;
   color-scheme: dark;
 }
