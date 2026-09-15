@@ -11,10 +11,11 @@ export function AppShell() {
   const location = useLocation()
   const isHome = location.pathname === '/'
   const isModelDetail = location.pathname.startsWith('/models/')
+  const isVisualization = location.pathname.startsWith('/visualizations')
   const isCategories = location.pathname.startsWith('/categories')
   const isArtificialAnalysis = location.pathname.startsWith('/artificial-analysis')
   const isDataQuality = location.pathname.startsWith('/data-quality')
-  const showFilters = !isHome && !isModelDetail
+  const showFilters = !isHome && !isModelDetail && !isVisualization
 
   const metadataQuery = useQuery({
     queryKey: ['metadata'],
@@ -40,7 +41,9 @@ export function AppShell() {
   })
 
   return (
-    <div className={`application${isHome ? ' application--home' : ''}`}>
+    <div
+      className={`application${isHome ? ' application--home' : ''}${isVisualization ? ' application--viz' : ''}`}
+    >
       <AppHeader metadata={metadataQuery.data} />
       {showFilters ? (
         <GlobalFilters

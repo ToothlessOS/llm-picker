@@ -8,6 +8,10 @@ import { DataQualityPage } from './features/data-quality/DataQualityPage'
 import { HomePage } from './features/home/HomePage'
 import { ModelDetailPage } from './features/models/ModelDetailPage'
 import { OverviewPage } from './features/overview/OverviewPage'
+import { PerformanceVsCostPage } from './features/visualizations/PerformanceVsCostPage'
+import { CostPerTaskPage } from './features/visualizations/CostPerTaskPage'
+import { TaskFitPage } from './features/visualizations/TaskFitPage'
+import { ModelCardPage } from './features/visualizations/ModelCardPage'
 import './App.css'
 
 function CategoryPathRedirect() {
@@ -35,6 +39,16 @@ function App() {
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<HomePage />} />
+        <Route
+          path="visualizations/performance-vs-cost"
+          element={<PerformanceVsCostPage />}
+        />
+        <Route
+          path="visualizations/cost-per-task"
+          element={<CostPerTaskPage />}
+        />
+        <Route path="visualizations/task-fit" element={<TaskFitPage />} />
+        <Route path="visualizations/model-card" element={<ModelCardPage />} />
         <Route path="models" element={<OverviewPage />} />
         <Route path="categories" element={<CategoriesPage />} />
         <Route path="categories/:category" element={<CategoryPathRedirect />} />
