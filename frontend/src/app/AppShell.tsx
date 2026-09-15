@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useEffect } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 
 import { getMetadata, getOverview } from '../api'
@@ -6,6 +7,7 @@ import { AppFooter } from '../components/AppFooter'
 import { AppHeader } from '../components/AppHeader'
 import { GlobalFilters } from '../components/GlobalFilters'
 import { FreshnessBanner } from '../components/states/FreshnessBanner'
+import { syncThemeFromSearch } from './theme'
 
 export function AppShell() {
   const location = useLocation()
@@ -16,6 +18,10 @@ export function AppShell() {
   const isArtificialAnalysis = location.pathname.startsWith('/artificial-analysis')
   const isDataQuality = location.pathname.startsWith('/data-quality')
   const showFilters = !isHome && !isModelDetail && !isVisualization
+
+  useEffect(() => {
+    syncThemeFromSearch(location.search)
+  }, [location.search])
 
   const metadataQuery = useQuery({
     queryKey: ['metadata'],
