@@ -2,16 +2,19 @@ import { useQuery } from '@tanstack/react-query'
 import { Outlet, useLocation } from 'react-router-dom'
 
 import { getMetadata, getOverview } from '../api'
+import { AppFooter } from '../components/AppFooter'
 import { AppHeader } from '../components/AppHeader'
 import { GlobalFilters } from '../components/GlobalFilters'
 import { FreshnessBanner } from '../components/states/FreshnessBanner'
 
 export function AppShell() {
   const location = useLocation()
+  const isHome = location.pathname === '/'
   const isModelDetail = location.pathname.startsWith('/models/')
   const isCategories = location.pathname.startsWith('/categories')
   const isArtificialAnalysis = location.pathname.startsWith('/artificial-analysis')
   const isDataQuality = location.pathname.startsWith('/data-quality')
+  const showFilters = !isHome && !isModelDetail
 
   const metadataQuery = useQuery({
     queryKey: ['metadata'],
@@ -33,13 +36,13 @@ export function AppShell() {
             .filter((provider): provider is string => provider !== null),
         ),
       ).sort((left, right) => left.localeCompare(right)),
-    enabled: !isModelDetail && !isDataQuality,
+    enabled: showFilters && !isDataQuality,
   })
 
   return (
-    <div className="application">
+    <div className={`application${isHome ? ' application--home' : ''}`}>
       <AppHeader metadata={metadataQuery.data} />
-      {!isModelDetail ? (
+      {showFilters ? (
         <GlobalFilters
           categoryRequiresSelection={isCategories}
           providerOptions={providersQuery.data}
@@ -52,6 +55,7 @@ export function AppShell() {
       <div className="page-container">
         <Outlet />
       </div>
+      <AppFooter metadata={metadataQuery.data} />
     </div>
   )
 }

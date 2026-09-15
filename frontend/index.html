@@ -8,6 +8,22 @@
       content="Compare language models across performance, cost, and speed."
     />
     <title>LLM Picker</title>
+    <script>
+      (function () {
+        var theme = new URLSearchParams(location.search).get('theme')
+        if (theme !== 'day' && theme !== 'night') {
+          var hour = new Date().getHours()
+          theme = hour >= 6 && hour < 18 ? 'day' : 'night'
+        }
+        document.documentElement.dataset.theme = theme
+      })()
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>

@@ -5,6 +5,7 @@ import { AppShell } from './app/AppShell'
 import { ArtificialAnalysisPage } from './features/artificial-analysis/ArtificialAnalysisPage'
 import { CategoriesPage } from './features/categories/CategoriesPage'
 import { DataQualityPage } from './features/data-quality/DataQualityPage'
+import { HomePage } from './features/home/HomePage'
 import { ModelDetailPage } from './features/models/ModelDetailPage'
 import { OverviewPage } from './features/overview/OverviewPage'
 import './App.css'
@@ -33,7 +34,8 @@ function App() {
   return (
     <Routes>
       <Route element={<AppShell />}>
-        <Route index element={<OverviewPage />} />
+        <Route index element={<HomePage />} />
+        <Route path="models" element={<OverviewPage />} />
         <Route path="categories" element={<CategoriesPage />} />
         <Route path="categories/:category" element={<CategoryPathRedirect />} />
         <Route path="artificial-analysis" element={<ArtificialAnalysisPage />} />

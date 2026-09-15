@@ -53,7 +53,7 @@ export function OverviewPage() {
         count={query.data?.count}
         description="Models with complete LMArena and Artificial Analysis coverage."
         isFetching={query.isFetching && !query.isPending}
-        title="Model overview"
+        title="Models"
       />
 
       {query.isPending ? <LoadingState label="Loading model overview" /> : null}

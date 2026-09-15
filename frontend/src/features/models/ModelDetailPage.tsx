@@ -18,7 +18,7 @@ export function ModelDetailPage() {
 
   return (
     <main className="page model-detail">
-      <Link className="back-link" to={{ pathname: '/', search: location.search }}>
+      <Link className="back-link" to={{ pathname: '/models', search: location.search }}>
         <ArrowLeft aria-hidden="true" size={16} />
         All models
       </Link>

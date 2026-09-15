@@ -5,6 +5,9 @@ import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.tsx'
 import { queryClient } from './app/queryClient.ts'
+import { startThemeClock } from './app/theme.ts'
+
+startThemeClock()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
