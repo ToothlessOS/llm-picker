@@ -46,6 +46,7 @@ describe('HomePage', () => {
     ).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Performance vs. cost' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Cost per task' })).toBeTruthy()
+    expect(screen.getByText('Where does the money go? Split by list prices, not usage.')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Task fit' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Model card' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Performance vs. cost' }).getAttribute('href')).toBe(

@@ -151,6 +151,9 @@ describe('CostPerTaskPage', () => {
     expect(cheap.getAttribute('href')).toBe('/models/cheap')
     expect(screen.getByRole('link', { name: /Mid task/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Output' })).toBeTruthy()
+    expect(
+      screen.getByText(/Stacks are a list-price mix, not Artificial Analysis's unpublished/),
+    ).toBeTruthy()
 
     await user.hover(cheap)
     await waitFor(() => {

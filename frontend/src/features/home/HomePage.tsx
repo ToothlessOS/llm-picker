@@ -79,7 +79,7 @@ export function HomePage() {
             <header>
               <div>
                 <h2 id="viz-cost-per-task-title">Cost per task</h2>
-                <p>Where does the money go?</p>
+                <p>Where does the money go? Split by list prices, not usage.</p>
               </div>
               <span className="viz-stage__action">
                 Open interactive

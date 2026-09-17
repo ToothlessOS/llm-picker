@@ -13,6 +13,7 @@ import {
   type MetadataResponse,
 } from '../api'
 import { formatDateTime } from '../app/format'
+import { ThemeToggle } from './ThemeToggle'
 
 interface NavigationItem {
   label: string
@@ -129,6 +130,8 @@ export function AppHeader({ metadata }: AppHeaderProps) {
             <span className="freshness-indicator__dot" aria-hidden="true" />
             <span>{freshness.label}</span>
           </NavLink>
+
+          {isHome ? <ThemeToggle /> : null}
         </div>
       </div>
     </header>

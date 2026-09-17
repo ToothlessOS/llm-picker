@@ -27,7 +27,8 @@ export function CostPerTaskPreview() {
       </div>
       {hasBars && model ? (
         <p className="viz-stage__caption">
-          {model.bars.length} models · stacked by token price mix
+          {model.bars.length} model{model.bars.length === 1 ? '' : 's'} · list-price mix, not
+          usage
         </p>
       ) : null}
     </>

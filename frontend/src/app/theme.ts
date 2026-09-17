@@ -1,4 +1,5 @@
 export type Theme = 'day' | 'night'
+export type ThemePreference = Theme | 'auto'
 
 const DAY_START_HOUR = 6
 const NIGHT_START_HOUR = 18
@@ -28,6 +29,24 @@ export function themeFromSearch(search: string): Theme | null {
   return value === 'day' || value === 'night' ? value : null
 }
 
+export function preferenceFromSearch(search: string): ThemePreference {
+  return themeFromSearch(search) ?? 'auto'
+}
+
+export function searchWithThemePreference(
+  search: string,
+  preference: ThemePreference,
+): string {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+  if (preference === 'auto') {
+    params.delete('theme')
+  } else {
+    params.set('theme', preference)
+  }
+  const next = params.toString()
+  return next ? `?${next}` : ''
+}
+
 export function resolveTheme(
   search: string = window.location.search,
   date: Date = new Date(),
@@ -42,30 +61,47 @@ export function applyTheme(
   root.dataset.theme = theme
 }
 
-export function startThemeClock() {
-  const override = themeFromSearch(window.location.search)
+let timer = 0
+let visibilityBound = false
+
+export function stopThemeClock() {
+  window.clearTimeout(timer)
+  timer = 0
+}
+
+function onVisibilityChange() {
+  if (document.hidden || themeFromSearch(window.location.search)) return
+  applyTheme(themeFromLocalTime())
+  scheduleThemeClock()
+}
+
+function bindVisibility() {
+  if (visibilityBound) return
+  visibilityBound = true
+  document.addEventListener('visibilitychange', onVisibilityChange)
+}
+
+function scheduleThemeClock() {
+  window.clearTimeout(timer)
+  timer = window.setTimeout(() => {
+    applyTheme(themeFromLocalTime())
+    scheduleThemeClock()
+  }, msUntilNextThemeBoundary())
+}
+
+export function syncThemeFromSearch(search: string = window.location.search) {
+  bindVisibility()
+  const override = themeFromSearch(search)
   if (override) {
+    stopThemeClock()
     applyTheme(override)
     return
   }
 
-  let timer = 0
+  applyTheme(themeFromLocalTime())
+  scheduleThemeClock()
+}
 
-  const sync = () => applyTheme(themeFromLocalTime())
-  const schedule = () => {
-    window.clearTimeout(timer)
-    timer = window.setTimeout(() => {
-      sync()
-      schedule()
-    }, msUntilNextThemeBoundary())
-  }
-
-  sync()
-  schedule()
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      sync()
-      schedule()
-    }
-  })
+export function startThemeClock() {
+  syncThemeFromSearch(window.location.search)
 }
