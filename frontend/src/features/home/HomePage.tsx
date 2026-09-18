@@ -1,31 +1,10 @@
+import { ArrowUpRight } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 
-const visualizations = [
-  {
-    title: 'Performance vs. cost',
-    question: 'Who is best at this price?',
-    forthcoming:
-      'Scatter of intelligence vs cost per task, with a dashed Pareto front.',
-  },
-  {
-    title: 'Cost per task',
-    question: 'Where does the money go?',
-    forthcoming:
-      'Stacked bars of input, output, and cache cost per intelligence-index task.',
-  },
-  {
-    title: 'Task fit',
-    question: 'Which model fits the job?',
-    forthcoming:
-      'Comparison across agent, document, search, and webdev. Replaces the unpublished battle heatmap.',
-  },
-  {
-    title: 'Model card',
-    question: 'How does this model compare?',
-    forthcoming:
-      'Radar of intelligence, coding, agentic, cost, and speed versus the cohort average.',
-  },
-] as const
+import { CostPerTaskPreview } from '../visualizations/CostPerTaskPreview'
+import { ModelCardPreview } from '../visualizations/ModelCardPreview'
+import { PerformanceVsCostPreview } from '../visualizations/PerformanceVsCostPreview'
+import { TaskFitPreview } from '../visualizations/TaskFitPreview'
 
 const dataLinks = [
   { to: '/models', title: 'Models', blurb: 'Complete matched table' },
@@ -75,21 +54,74 @@ export function HomePage() {
       <section className="home-section" id="visualizations">
         <p className="home-kicker">Visualizations</p>
         <div className="viz-gallery">
-          {visualizations.map((item) => (
-            <article className="viz-stage" key={item.title}>
-              <header>
-                <h2>{item.title}</h2>
-                <p>{item.question}</p>
-              </header>
-              <div
-                aria-label={`${item.title} placeholder`}
-                className="viz-stage__canvas"
-                role="img"
-              >
-                <p>{item.forthcoming}</p>
+          <Link
+            aria-labelledby="viz-performance-cost-title"
+            className="viz-stage viz-stage--link"
+            to={{ pathname: '/visualizations/performance-vs-cost', search: location.search }}
+          >
+            <header>
+              <div>
+                <h2 id="viz-performance-cost-title">Performance vs. cost</h2>
+                <p>Who is best at this price?</p>
               </div>
-            </article>
-          ))}
+              <span className="viz-stage__action">
+                Open interactive
+                <ArrowUpRight aria-hidden="true" size={16} />
+              </span>
+            </header>
+            <PerformanceVsCostPreview />
+          </Link>
+          <Link
+            aria-labelledby="viz-cost-per-task-title"
+            className="viz-stage viz-stage--link"
+            to={{ pathname: '/visualizations/cost-per-task', search: location.search }}
+          >
+            <header>
+              <div>
+                <h2 id="viz-cost-per-task-title">Cost per task</h2>
+                <p>Where does the money go? Split by list prices, not usage.</p>
+              </div>
+              <span className="viz-stage__action">
+                Open interactive
+                <ArrowUpRight aria-hidden="true" size={16} />
+              </span>
+            </header>
+            <CostPerTaskPreview />
+          </Link>
+          <Link
+            aria-labelledby="viz-task-fit-title"
+            className="viz-stage viz-stage--link"
+            to={{ pathname: '/visualizations/task-fit', search: location.search }}
+          >
+            <header>
+              <div>
+                <h2 id="viz-task-fit-title">Task fit</h2>
+                <p>Which model fits the job?</p>
+              </div>
+              <span className="viz-stage__action">
+                Open interactive
+                <ArrowUpRight aria-hidden="true" size={16} />
+              </span>
+            </header>
+            <TaskFitPreview />
+          </Link>
+          <Link
+            aria-labelledby="viz-model-card-title"
+            className="viz-stage viz-stage--link"
+            to={{ pathname: '/visualizations/model-card', search: location.search }}
+          >
+            <header>
+              <div>
+                <h2 id="viz-model-card-title">Model card</h2>
+                <p>How does this model compare?</p>
+              </div>
+              <span className="viz-stage__action">
+                Open interactive
+                <ArrowUpRight aria-hidden="true" size={16} />
+              </span>
+            </header>
+            <ModelCardPreview />
+          </Link>
         </div>
       </section>
 

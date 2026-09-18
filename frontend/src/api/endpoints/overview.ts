@@ -79,3 +79,37 @@ export function getOverview(
 ): Promise<OverviewResponse> {
   return apiClient.get('overview/', serializeOverviewParams(params), options)
 }
+
+export const OVERVIEW_PAGE_LIMIT = 50
+
+export async function collectPaginatedOverview(
+  fetchPage: (
+    params: OverviewParams,
+    options?: ApiRequestOptions,
+  ) => Promise<OverviewResponse>,
+  params: OverviewParams = {},
+  options?: ApiRequestOptions,
+): Promise<OverviewResponse> {
+  const pageSize = params.pageSize ?? 200
+  const results: OverviewResponse['results'] = []
+  let page = 1
+  let latest: OverviewResponse | undefined
+
+  while (page <= OVERVIEW_PAGE_LIMIT) {
+    latest = await fetchPage({ ...params, page, pageSize }, options)
+    results.push(...latest.results)
+    if (!latest.next) {
+      return {
+        ...latest,
+        next: null,
+        previous: null,
+        results,
+      }
+    }
+    page += 1
+  }
+
+  throw new Error(
+    `Overview listing did not exhaust pagination within ${OVERVIEW_PAGE_LIMIT} pages.`,
+  )
+}

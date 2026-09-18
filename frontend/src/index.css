@@ -21,6 +21,11 @@
   --color-warning-border: #ead397;
   --color-danger: #a33b3b;
   --color-danger-soft: #fbeaea;
+  --color-cost-input: #9bb8b6;
+  --color-cost-output: #176b68;
+  --color-cost-cache-write: #b45a1b;
+  --color-cost-cache-hit: #5c7370;
+  --color-cost-unspecified: #c9c0b4;
   --shadow-header: none;
   --radius-sm: 2px;
   --radius-md: 4px;
@@ -57,6 +62,11 @@
   --color-warning-text: #f3e09a;
   --color-warning-border: #6a5820;
   --color-danger-soft: #3a2222;
+  --color-cost-input: #7aa8a5;
+  --color-cost-output: #3d9a95;
+  --color-cost-cache-write: #d4894a;
+  --color-cost-cache-hit: #8a9c99;
+  --color-cost-unspecified: #3d4c48;
   color-scheme: dark;
 }
 

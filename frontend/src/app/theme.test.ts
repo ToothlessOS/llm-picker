@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { msUntilNextThemeBoundary, themeFromLocalTime, themeFromSearch } from './theme'
+import {
+  msUntilNextThemeBoundary,
+  preferenceFromSearch,
+  searchWithThemePreference,
+  themeFromLocalTime,
+  themeFromSearch,
+} from './theme'
 
 function at(hours: number, minutes = 0) {
   return new Date(2026, 8, 15, hours, minutes, 0, 0)
@@ -27,6 +33,31 @@ describe('themeFromSearch', () => {
     expect(themeFromSearch('?theme=day')).toBe('day')
     expect(themeFromSearch('?theme=sepia')).toBeNull()
     expect(themeFromSearch('')).toBeNull()
+  })
+})
+
+describe('preferenceFromSearch', () => {
+  it('treats a missing or unknown theme as auto', () => {
+    expect(preferenceFromSearch('')).toBe('auto')
+    expect(preferenceFromSearch('?q=gpt')).toBe('auto')
+    expect(preferenceFromSearch('?theme=sepia')).toBe('auto')
+  })
+
+  it('reads an explicit day or night preference', () => {
+    expect(preferenceFromSearch('?theme=day')).toBe('day')
+    expect(preferenceFromSearch('?theme=night')).toBe('night')
+  })
+})
+
+describe('searchWithThemePreference', () => {
+  it('writes an explicit theme into the query string', () => {
+    expect(searchWithThemePreference('', 'night')).toBe('?theme=night')
+    expect(searchWithThemePreference('?q=gpt', 'day')).toBe('?q=gpt&theme=day')
+  })
+
+  it('removes the theme param in auto mode', () => {
+    expect(searchWithThemePreference('?theme=night', 'auto')).toBe('')
+    expect(searchWithThemePreference('?q=gpt&theme=day', 'auto')).toBe('?q=gpt')
   })
 })
 
