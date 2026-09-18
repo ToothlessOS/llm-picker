@@ -1,0 +1,123 @@
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+
+# GITHUB_TOKEN defaults to broader permissions in some org configurations; pin it.
+permissions:
+  contents: read
+
+# Pages allows one deployment at a time. Never cancel an in-flight deploy -- a
+# half-published site is worse than a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # These three gate the deploy: nothing is built or published if any fails.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: frontend
+        run: npm run test
+
+      # Runs BEFORE the build so its `base_path` output can feed Vite. That keeps
+      # the asset prefix derived from the repository's real Pages configuration
+      # instead of a hard-coded string a repo rename would silently break.
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build
+        working-directory: frontend
+        env:
+          VITE_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          # A repository *variable*, not a secret: it is inlined into a public JS
+          # bundle. Set it under Settings -> Secrets and variables -> Actions ->
+          # Variables.
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          # Without this, config.ts silently falls back to http://127.0.0.1:8000
+          # and ships a frontend that works for nobody.
+          if [ -z "${VITE_API_BASE_URL}" ]; then
+            echo "::error::Set the repository variable VITE_API_BASE_URL, e.g. https://api.example.com/api/v1/leaderboard/"
+            exit 1
+          fi
+
+          # Pages is HTTPS, so a plaintext API is blocked as mixed content. The
+          # symptom is a blank page rather than an error message.
+          case "${VITE_API_BASE_URL}" in
+            https://*) ;;
+            *)
+              echo "::error::VITE_API_BASE_URL must be https:// (GitHub Pages is HTTPS). Got: ${VITE_API_BASE_URL}"
+              exit 1
+              ;;
+          esac
+
+          npm run build
+
+      # A wrong `base` fails at runtime, not at build time -- the deploy would go
+      # green and the site would be blank. Assert the two things that matter.
+      - name: Check the built output
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+
+          if ! grep -q 'src="/llm-picker/assets/' dist/index.html; then
+            echo "::error::dist/index.html does not reference /llm-picker/assets/ -- check VITE_BASE_PATH and the Pages source setting"
+            exit 1
+          fi
+
+          if [ ! -f dist/404.html ]; then
+            echo "::error::dist/404.html was not generated -- deep links would 404"
+            exit 1
+          fi
+
+      # include-hidden-files stays false: nothing hidden belongs in the artifact,
+      # and .nojekyll is unnecessary -- this build type does not run Jekyll.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

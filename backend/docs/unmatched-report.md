@@ -49,7 +49,7 @@ so is a report that lies about coverage.
 
 ## What the output looks like
 
-Real output, live data, 2026-09-11:
+Real output, live data, 2026-09-18:
 
 ```
 source                category    reason                    model_name                                      model_key
@@ -58,22 +58,23 @@ artificial_analysis   agent       no_lmarena_match          A.X-K2              
 artificial_analysis   agent       no_lmarena_match          Agnes 2.5 Pro Alpha                             agnes-2-5-pro-alpha
 artificial_analysis   agent       no_lmarena_match          Agnes 2.5 Pro Beta                              agnes-2-5-pro-beta
 ...
-(showing 5 of 905 rows)
+(showing 5 of 904 rows)
 
 Detail:
-  a-x-k2: {"name_key": "a-x-k2", "slug_key": "a-x-k2", "name_states_effort": false, "slug_rung_skipped": false, "slug": "a-x-k2"}
+  a-x-k2: {"name_key": "a-x-k2", "slug_key": "a-x-k2", "name_states_effort": false, "slug_rung_skipped": false}
+  claude-fable-5: {"name_key": "claude-fable-5-adaptive-reasoning-max-effort-opus-4-8-fallback", "slug_key": "claude-fable-5", "name_states_effort": false, "slug_rung_skipped": false, "effort": "max", "effort_key_tried": "claude-fable-5-max"}
 
 By reason:
      615  no_lmarena_match
           An AA record with no LMArena `agent` counterpart. Review whether AA
           simply lacks the model or our normalizer needs an alias.
-     150  not_in_agent_set
+     149  not_in_agent_set
           A document/search/webdev model absent from the `agent` split. Usually
           expected -- search-specialized models genuinely do not exist in agent.
-     126  duplicate_model_name
+     128  duplicate_model_name
           Several upstream rows collapsed onto one normalized key. The winner was
           kept; the loser is listed here with both ranks.
-      13  no_aa_match
+      11  no_aa_match
           An LMArena `agent` model with no AA record at the same reasoning level.
           These are exactly the entries the completeness rule removes from
           /overview/ -- confirm whether AA lacks the model or an alias is needed.
@@ -116,13 +117,21 @@ A high number means a persistent gap, not a transient blip: worth acting on. A
 
 Most rows in the report are **correct behaviour, listed for auditability**:
 
-* The 615 `no_lmarena_match` + 150 `not_in_agent_set` + 126
+* The 615 `no_lmarena_match` + 149 `not_in_agent_set` + 128
   `duplicate_model_name` are largely the shape of the two sources' model sets
-  rather than defects. AA publishes 646 models; LMArena's `agent` split has 43.
+  rather than defects. AA publishes 652 models; LMArena's `agent` split has 46.
   They *should* not join.
 * The rows worth working are the ones where **the two sources almost certainly do
-  describe the same model**: `no_aa_match` (13 today) and `ambiguous_match` (1),
+  describe the same model**: `no_aa_match` (11 today) and `ambiguous_match` (1),
   plus any `validation_failed` (a schema change is a real bug).
+
+When a `no_lmarena_match` row carries `effort` in its detail, the ladder read a
+reasoning level off the AA name and tried `<slug>-<level>` (shown as
+`effort_key_tried`) against the agent set. That is the rung that resolves AA's
+verbose prose; a row that has `effort` but no `effort_key_tried` was suppressed by
+the guard because its slug already names the level. Either way, an absent key
+means LMArena publishes nothing at that level — see
+[data-sources.md](data-sources.md#the-stated-effort-rung--exact_effort_slug).
 
 A fast way to separate them: sort your attention by `occurrences` — a gap that
 has survived several refreshes is a stable disagreement between the sources

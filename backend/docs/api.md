@@ -390,8 +390,8 @@ invariantly true. For the excluded rows use `/categories/{category}/`,
 
 | Field | Origin | Notes |
 |---|---|---|
-| `method` | backend-derived | `alias` (a human asserted it), `exact_key`, `exact_name`, `exact_slug`, or `harness_fold`. On live data the join is `exact_name` and `exact_slug` only. |
-| `confidence` | backend-derived | `1.0` for high-confidence rungs, `0.75` for lower ones. Heuristic, for review tooling. |
+| `method` | backend-derived | `alias` (a human asserted it), `exact_key`, `exact_name`, `exact_slug`, `exact_effort_slug`, or `harness_fold`. On live data the AA↔agent join is `exact_name`, `exact_slug` and `exact_effort_slug` only. |
+| `confidence` | backend-derived | `1.0` for rungs whose key the sources themselves state (including `exact_effort_slug`, whose key is constructed from a stated level), `0.75` for `harness_fold`, the one genuine inference. Heuristic, for review tooling. |
 | `is_manual` | backend-derived | `true` when a human asserted the match via `ModelAlias`. |
 | `matched_key` | backend-derived | The `agent` key the AA record resolved to. |
 | `last_matched_at` | backend-derived | When the join was last recomputed. |
@@ -422,7 +422,7 @@ Unpaginated. Lets you build tabs from real data and see an empty intersection
   "meta": {
     "generated_at": "...", "sources": { "..." : "..." },
     "primary_category": "agent",
-    "matched_agent_models": 30
+    "matched_agent_models": 35
   }
 }
 ```
@@ -665,11 +665,11 @@ Unpaginated. The contract for "how old is this data, and is anything wrong".
   },
   "counts": {
     "lmarena_entries": 242, "lmarena_agent_entries": 43,
-    "complete_agent_entries": 30, "aa_models": 646, "aa_models_retained": 30,
-    "matches": 30, "unmatched_records": 905
+    "complete_agent_entries": 35, "aa_models": 652, "aa_models_retained": 35,
+    "matches": 35, "unmatched_records": 904
   },
   "categories": [ "...": "identical to /categories/, for building tabs in one call" ],
-  "matching": {"exact_name": 26, "exact_slug": 4},
+  "matching": {"exact_name": 27, "exact_slug": 5, "exact_effort_slug": 3},
   "recent_runs": [ "...": "up to 5, newest first — see below" ],
   "config": {"harness_fold_enabled": true, "stale_after_seconds": 50400},
   "attribution": {
@@ -866,20 +866,22 @@ inventing one. Treat its absence as "wait, duration unknown", not as zero.
 
 ### Coverage: what is and is not joined
 
-Measured on live data, 2026-09-11:
+Measured on live data, 2026-09-18:
 
 | | Count |
 |---|---|
-| LMArena `agent` models | 43 |
-| …with an AA match (`/overview/`) | **30** |
-| …with no AA match (: `/unmatched/?reason=no_aa_match`) | 13 |
-| AA records fetched | 646 |
-| …retained (in the agent set) | 30 |
+| LMArena `agent` models | 46 |
+| …with an AA match (`/overview/`) | **35** |
+| …with no AA match (: `/unmatched/?reason=no_aa_match`) | 11 |
+| AA records fetched | 652 |
+| …retained (in the agent set) | 35 |
 
-The 13 are not a bug to work around: AA and LMArena publish different model sets
+The 11 are not a bug to work around: AA and LMArena publish different model sets
 and different reasoning levels, and the ladder is deliberately forbidden from
 guessing (matching `-high` to a different effort level would attach the wrong
-numbers). They are named individually in `/unmatched/`.
+numbers). Where the two sources state the *same* level, the `exact_effort_slug`
+rung reads it rather than guessing; the rest are named individually in
+`/unmatched/`.
 
 **If you need one of them:** the honest fix is a `ModelAlias` — a human asserting
 the two records are the same model — not a query parameter that relaxes the

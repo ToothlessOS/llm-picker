@@ -107,7 +107,7 @@ llm_picker_backend/     settings, urls, celery app
 leaderboard/
   models.py            7 models, latest-only
   constants.py         enums, ordering whitelists, category→metric-kind map
-  normalization.py     normalize_model_key(), harness_fold()
+  normalization.py     normalize_model_key(), harness_fold(), effort_from_name()
   matching.py          the deterministic match ladder
   validation.py        parse_aa_model(), parse_lmarena_row() — pure
   persistence.py       every database write; the unmatched ledger
@@ -140,7 +140,7 @@ full set. The ones that matter:
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Broker `/0`, results `/1`, lock cache `/2`. |
 | `CELERY_TIMEZONE` | `Asia/Shanghai` | Must be a **real IANA zone** — see below. |
 | `LEADERBOARD_STALE_AFTER_SECONDS` | `50400` (14 h) | Twice the 12 h schedule, so one missed run is not an alarm. Shared by `/metadata/` and `refresh_if_stale`. |
-| `LEADERBOARD_ENABLE_HARNESS_FOLD` | `true` | The one inferred join in the ladder. |
+| `LEADERBOARD_ENABLE_HARNESS_FOLD` | `true` | The one *inferred* join in the ladder (the `harness_fold` rung, the only one scoring below `confidence` 1.0). |
 | `LEADERBOARD_STARTUP_REFRESH_COOLDOWN_SECONDS` | `1800` (30 min) | Minimum gap between `refresh_if_stale` attempts, whatever the previous one's outcome. Protects the shared AA quota from a restart loop. |
 | `LEADERBOARD_THROTTLE_ENABLED` | `true` | Master switch for the API's rate limit. |
 | `LEADERBOARD_THROTTLE_BURST` | `60/min` | Per-IP burst ceiling. |
@@ -166,8 +166,8 @@ Base path `/api/v1/leaderboard/`. Seven read-only `GET` endpoints — `overview`
 
 **The one thing to know before reading the docs:**
 `/overview/` and `/models/{key}/` serve **complete entries only** — an LMArena
-`agent` row *and* a matched Artificial Analysis record. On live data that is 30
-of 43 agent models. A real-but-unmatched model is a `404 model_incomplete` with
+`agent` row *and* a matched Artificial Analysis record. On live data that is 35
+of 46 agent models. A real-but-unmatched model is a `404 model_incomplete` with
 the reason in the body — an expected state, not an error to escalate. Every
 excluded row stays reachable through `/categories/{category}/`,
 `/artificial-analysis/` and `/unmatched/`.

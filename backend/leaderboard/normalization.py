@@ -12,6 +12,11 @@ their own**, and neither does LMArena against Artificial Analysis:
 Exact string comparison across any of those pairs yields a **zero** intersection.
 Everything here is a pure function of its input: no fuzzy scoring, no similarity
 thresholds, no external state.
+
+Two of the readers below look for a reasoning effort and must not be confused:
+`has_effort_marker` answers "is AA's bare slug unsafe to consult?" and is blind to
+AA's verbose prose on purpose; `effort_from_name` answers "which level does the
+name state?" and is the one that reads the prose.
 """
 
 from __future__ import annotations
@@ -60,6 +65,12 @@ def has_effort_marker(model_key: str) -> bool:
 
     Checks the trailing one and two tokens, because ``non-reasoning`` normalizes
     to two hyphen-joined words.
+
+    Its blindness to AA's verbose prose (``"…(Adaptive Reasoning, Max Effort)"``
+    ends in ``effort``, not an effort word) is deliberate and permanent -- it is
+    what keeps the bare slug rung closed for those records. The prose is read
+    instead by `effort_from_name`, which serves a different purpose. Do not widen
+    this to cover the verbose form, and do not merge the two.
     """
     if not model_key:
         return False
@@ -69,6 +80,47 @@ def has_effort_marker(model_key: str) -> bool:
     if len(tokens) >= 2 and "-".join(tokens[-2:]) in EFFORT_TOKENS:
         return True
     return False
+
+
+def effort_from_name(name: object) -> str | None:
+    """The reasoning-effort token AA *explicitly states* in `name`, or ``None``.
+
+    Deliberately not `has_effort_marker`, and the two must not be merged: that
+    one gates whether AA's bare ``slug`` is safe to consult, this one reads what
+    the name says so that a key can be *constructed* from it. Its silence and its
+    speech both have to be deliberate.
+
+    Reads both AA dialects:
+
+    * terse parenthetical -- ``"GPT-5.5 (xhigh)"`` -> ``xhigh``
+    * verbose prose -- ``"Claude Opus 5 (Adaptive Reasoning, Max Effort)"`` -> ``max``
+
+    The word ``Effort`` is **required** in the prose form. That is what makes the
+    statement explicit rather than inferred, and it is the line between this
+    reader and the effort *fold* this project rejected. ``"(Adaptive Reasoning,
+    Max)"`` therefore returns ``None`` -- only what is stated counts.
+
+    The contract is "what the name states", not "what the model's effort is": a
+    product name containing an effort word (``"Qwen3.8 Max"``) returns ``max``.
+    Callers use the result only to build a candidate key, where an over-eager
+    answer is suppressed by the caller's guard; this must not be used to make a
+    judgement about a model's effort.
+    """
+    key = normalize_model_key(name)
+    if not key:
+        return None
+    tokens = key.split("-")
+    # Terse parenthetical, mirroring `has_effort_marker` including its two-token
+    # case, so the two functions cannot disagree about which token they saw.
+    if tokens[-1] in EFFORT_TOKENS:
+        return tokens[-1]
+    if len(tokens) >= 2 and "-".join(tokens[-2:]) in EFFORT_TOKENS:
+        return "-".join(tokens[-2:])
+    # Verbose prose: "<level> Effort", anywhere in the name.
+    for index in range(len(tokens) - 1):
+        if tokens[index + 1] == "effort" and tokens[index] in EFFORT_TOKENS:
+            return tokens[index]
+    return None
 
 
 def harness_fold(model_key: str) -> tuple[str, str] | None:

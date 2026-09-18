@@ -1,0 +1,185 @@
+# Production topology. Run from `backend/`.
+#
+# TLS is terminated by the *host's* nginx, not by anything in this file -- this
+# server already runs other services on :80/:443. That is also why there is no
+# certbot here: Let's Encrypt's HTTP-01 challenge needs port 80, which the host
+# proxy owns, so an in-stack ACME client could never validate.
+#
+# The host proxy forwards to 127.0.0.1:8000 (see DEPLOYMENT.md) and MUST send
+# `X-Forwarded-Proto: https`, or Django sees the request as plaintext and
+# SECURE_SSL_REDIRECT turns every call into a redirect loop.
+#
+# Compose reads `backend/.env` twice: for ${VAR} interpolation in this file, and
+# through each service's `env_file:`. Deployment *shape* lives in `environment:`
+# below rather than in .env, because environment beats env_file -- so the whole
+# configuration is reviewable in one diff and a fresh server cannot come up with
+# DEBUG on because someone forgot a line.
+
+x-app: &app
+  # No `build:` here, deliberately. `init`, `web`, `worker` and `beat` all run
+  # the same image, but only ONE service may declare how to build it --
+  # `docker compose build` builds every service with a build section, and four
+  # of them exporting to the same tag in parallel makes BuildKit fail with
+  #   failed to solve: image "…/llm-picker-api:latest": already exists
+  # The build lives on `web` alone; the other three reference the tag it makes.
+  #
+  # Consequence: starting one of those three alone on a machine that has never
+  # built will try to *pull* this tag from Docker Hub and fail. Use the full
+  # `docker compose up -d`, which builds `web` first.
+  image: llm-picker-api:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    # Fail at `config` time, not as a crash loop, on an empty or missing secret.
+    # `:?` treats a present-but-empty value as an error, which matters because
+    # `settings.env()` only falls back to its default when the variable is
+    # *unset* -- `DJANGO_SECRET_KEY=` would reach Django as "" and raise
+    # ImproperlyConfigured on the first request.
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in backend/.env}
+    # Hard off, and not left to a file that might not exist.
+    DJANGO_DEBUG: "false"
+    # The public hostname your nginx serves, plus loopback for `compose exec`
+    # debugging. Omitting the hostname would 400 every proxied request.
+    DJANGO_ALLOWED_HOSTS: "${DOMAIN:?set DOMAIN in backend/.env},127.0.0.1"
+    # The *bare* origin of the deployed frontend: scheme + host, no path, no
+    # trailing slash. Override CORS_ALLOWED_ORIGINS in .env if it is not the
+    # toothlessos Pages site.
+    DJANGO_CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-https://toothlessos.github.io}"
+    DJANGO_CSRF_TRUSTED_ORIGINS: "https://${DOMAIN:?set DOMAIN in backend/.env}"
+    # Exactly ONE proxy in front: the host's nginx. This is what makes DRF's
+    # throttles count per client rather than collapsing everyone onto the
+    # proxy's IP. Raise it only if you add another hop you control -- see the
+    # note in settings.py; too high starts trusting a forgeable header.
+    DJANGO_NUM_PROXIES: "1"
+    # The default is redis://127.0.0.1:6379, which inside a container is the
+    # container itself: throttling would fail open (silently unlimited) and
+    # Celery could not reach its broker at all.
+    REDIS_URL: redis://redis:6379
+    # SQLite, and therefore its -wal/-shm sidecars, onto the mounted volume
+    # instead of into the image layer.
+    SQLITE_PATH: /data/db.sqlite3
+    CELERY_TIMEZONE: Asia/Shanghai
+  networks:
+    - backend
+
+services:
+  redis:
+    image: redis:8.8.2-alpine
+    restart: unless-stopped
+    # Broker (/0), result backend (/1) and the throttle counters plus refresh
+    # lock (/2). Every key is either transient or rebuildable, so AOF is off and
+    # RDB gives a fast restart without doubling the write volume.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # One-shot. Migrations run exactly once per `up`, in a single container, before
+  # anything that serves or writes starts.
+  #
+  # NOT in the image entrypoint: `web`, `worker` and `beat` share that image, and
+  # three containers would run `migrate` concurrently against one SQLite file,
+  # which `migrate` has never supported. A crash-looping container would also
+  # re-run migrations on every restart, turning a bad migration into a loop.
+  #
+  # No collectstatic here -- it runs at image build time, because WhiteNoise
+  # serves the result straight out of the image and nothing mounts over it.
+  init:
+    <<: *app
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - sqlite_data:/data
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        python manage.py check --deploy
+        python manage.py migrate --noinput
+
+  web:
+    <<: *app
+    # The only build in this file. See the note on `x-app`.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+    # LOOPBACK ONLY. The host's nginx reaches this on 127.0.0.1:8000; nothing on
+    # the internet can. Publishing on 0.0.0.0 would let clients bypass the proxy
+    # entirely -- losing TLS and logging the wrong client IP for throttling.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      # A TCP connect, deliberately -- not an HTTP request to a DRF endpoint.
+      # At a 30s interval an HTTP check would make 2880 requests/day, which is
+      # more than the 2000/day SustainedThrottle budget: it would exhaust its own
+      # bucket by mid-afternoon and then flap on the 429 it earned. `python` is
+      # already in the image, so this needs no extra package.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket;socket.create_connection(('127.0.0.1',8000),5).close()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    <<: *app
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+      - hf_cache:/cache/hf
+    # `refresh_if_stale` first, so a cold deploy is not an empty board until the
+    # next 08:00/20:00 Asia/Shanghai slot. It is gated on staleness *and* a
+    # 30-minute cooldown and never exits non-zero, so a restart loop cannot turn
+    # it into a fetch loop -- `|| true` just keeps the worker starting regardless.
+    #
+    # concurrency=1: each prefork child imports pandas + pyarrow + datasets to
+    # run a task that must serialize on the SQLite write lock anyway.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        python manage.py refresh_if_stale || true
+        exec celery -A llm_picker_backend worker \
+          --loglevel=INFO --concurrency=1 --max-tasks-per-child=20
+
+  beat:
+    <<: *app
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+    # Exactly one beat may run. DatabaseScheduler rewrites the PeriodicTask rows
+    # on start, and two would race -- and double-fire every refresh, spending the
+    # Artificial Analysis quota twice.
+    command: celery -A llm_picker_backend beat --loglevel=INFO
+
+volumes:
+  redis_data:
+  sqlite_data:
+  hf_cache:
+
+networks:
+  backend:
+    driver: bridge

@@ -1,0 +1,41 @@
+# Never ship the developer's virtualenv. It is ~400 MB, and its pyvenv.cfg and
+# bin/python record host-absolute paths -- copying it over the image's
+# /app/.venv would replace a working venv with a broken one.
+.venv
+
+# Never ship secrets. `backend/.env` holds a live AA_API_KEY. COPY puts it in an
+# image layer, where it survives even if a later layer deletes the file.
+# `.env.example` is the documented, secret-free template and belongs in the image.
+.env
+.env.*
+!.env.example
+
+# The glob matters: a bare `db.sqlite3` leaves the `-wal` and `-shm` sidecars in
+# the build context. In production the database lives on a mounted volume.
+db.sqlite3*
+
+__pycache__
+*.py[cod]
+*.so
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+node_modules
+staticfiles
+media
+logs
+*.log
+
+.git
+.github
+.gitignore
+Dockerfile
+.dockerignore
+
+# NOTE: README.md is deliberately NOT excluded. `pyproject.toml` declares
+# `readme = "README.md"`. That is inert today only because uv treats this as a
+# virtual project (`source = { virtual = "." }` in uv.lock) and never builds it,
+# which makes excluding it a trap for whoever adds a build-system later.
