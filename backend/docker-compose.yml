@@ -1,0 +1,238 @@
+# Production topology. Run from `backend/`.
+#
+# Compose reads `backend/.env` twice, and both matter:
+#   * for ${VAR} interpolation in *this file* -- which is why DOMAIN and
+#     DJANGO_SECRET_KEY get `:?` guards below;
+#   * through each service's `env_file:`, which is how the processes see them.
+#
+# First deployment, in order:
+#   1. fill in backend/.env. `docker compose config` fails loudly on the ones
+#      that are load-bearing, rather than letting a container crash-loop.
+#   2. docker compose up -d --build
+#      nginx starts HTTP-only, because no certificate exists yet.
+#   3. certbot issues the certificate; nginx promotes itself to TLS on its next
+#      6-hourly re-check. To skip that wait: docker compose restart nginx
+#
+# Deployment *shape* deliberately lives in `environment:` below rather than in
+# .env: environment beats env_file, so the whole configuration is reviewable in
+# one diff, and a fresh server cannot silently come up with DEBUG on because
+# someone forgot a line.
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: llm-picker-api:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    # Fail at `config` time, not as a crash loop, on an empty or missing secret.
+    # `:?` treats a present-but-empty value as an error, which matters because
+    # `settings.env()` only falls back to its default when the variable is
+    # *unset* -- `DJANGO_SECRET_KEY=` would therefore reach Django as "" and
+    # raise ImproperlyConfigured on the first request.
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in backend/.env}
+    # Hard off, and not left to a file that might not exist.
+    DJANGO_DEBUG: "false"
+    # 127.0.0.1 is for `docker compose exec` debugging; nginx forwards the real
+    # hostname. Omitting the hostname would 400 every request from the proxy.
+    DJANGO_ALLOWED_HOSTS: "${DOMAIN:?set DOMAIN in backend/.env},127.0.0.1"
+    # The *bare* origin: no path, no trailing slash. This is the GitHub Pages
+    # site, which is a different origin from the API.
+    DJANGO_CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-https://toothlessos.github.io}"
+    DJANGO_CSRF_TRUSTED_ORIGINS: "https://${DOMAIN:?set DOMAIN in backend/.env}"
+    # Exactly one proxy we control: nginx. This is what makes DRF's throttles
+    # count per client instead of collapsing everyone onto nginx's container IP.
+    # See the note in settings.py -- 2 or more would trust a forgeable header.
+    DJANGO_NUM_PROXIES: "1"
+    # The default is redis://127.0.0.1:6379, which inside a container is the
+    # container itself: throttling would fail open (silently unlimited) and
+    # Celery could not reach its broker at all.
+    REDIS_URL: redis://redis:6379
+    # SQLite, and therefore its -wal/-shm sidecars, onto the mounted volume
+    # instead of into the image layer.
+    SQLITE_PATH: /data/db.sqlite3
+    CELERY_TIMEZONE: Asia/Shanghai
+  networks:
+    - backend
+
+services:
+  redis:
+    image: redis:8.8.2-alpine
+    restart: unless-stopped
+    # Broker (/0), result backend (/1) and the throttle counters plus refresh
+    # lock (/2). Every key is either transient or rebuildable, so AOF is off and
+    # RDB gives a fast restart without doubling the write volume.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # One-shot. Migrations and collectstatic run exactly once per `up`, in a single
+  # container, before anything that serves or writes starts.
+  #
+  # They are NOT in the image entrypoint because web, worker and beat share that
+  # image: three containers would run `migrate` concurrently against one SQLite
+  # file (unsupported), and race on `collectstatic --clear` into one volume. Nor
+  # at image *build* time, because `static_data` is a named volume and Docker
+  # copies image content into one only on first creation -- a build-time
+  # collectstatic works once and then silently goes stale on every later `up`.
+  init:
+    <<: *app
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - static_data:/app/staticfiles
+      - sqlite_data:/data
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        python manage.py check --deploy
+        python manage.py migrate --noinput
+        python manage.py collectstatic --noinput --clear
+
+  web:
+    <<: *app
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      # A TCP connect, deliberately -- not an HTTP request to a DRF endpoint.
+      # At a 30s interval an HTTP check would make 2880 requests/day, which is
+      # more than the 2000/day SustainedThrottle budget: it would exhaust its own
+      # bucket by mid-afternoon and then flap on the 429 it earned. `python` is
+      # already in the image, so this needs no extra package.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket;socket.create_connection(('127.0.0.1',8000),5).close()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    <<: *app
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+      - hf_cache:/cache/hf
+    # `refresh_if_stale` first, so a cold deploy is not an empty board until the
+    # next 08:00/20:00 Asia/Shanghai slot. It is gated on staleness *and* a
+    # 30-minute cooldown and never exits non-zero, so a restart loop cannot turn
+    # it into a fetch loop -- `|| true` just keeps the worker starting regardless.
+    #
+    # concurrency=1: each prefork child imports pandas + pyarrow + datasets to
+    # run a task that must serialize on the SQLite write lock anyway.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        python manage.py refresh_if_stale || true
+        exec celery -A llm_picker_backend worker \
+          --loglevel=INFO --concurrency=1 --max-tasks-per-child=20
+
+  beat:
+    <<: *app
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite_data:/data
+    # Exactly one beat may run. DatabaseScheduler rewrites the PeriodicTask rows
+    # on start, and two would race -- and double-fire every refresh, spending the
+    # Artificial Analysis quota twice.
+    command: celery -A llm_picker_backend beat --loglevel=INFO
+
+  nginx:
+    image: nginx:stable-alpine3.24-slim
+    restart: unless-stopped
+    depends_on:
+      # service_started, not service_healthy: nginx is the TLS terminator and the
+      # ACME webroot host, and neither may depend on the application being up --
+      # otherwise a certificate renewal fails whenever the app is down.
+      web:
+        condition: service_started
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in backend/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Must be chmod +x on the host, or the entrypoint silently skips it.
+      - ./docker/nginx/10-select-config.sh:/docker-entrypoint.d/10-select-config.sh:ro
+      - ./docker/nginx/conf.d-src:/etc/nginx/conf.d-src:ro
+      - static_data:/var/www/static:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_conf:/etc/letsencrypt:ro
+    networks:
+      - backend
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    # The image's ENTRYPOINT is `certbot` with NO default command (verified from
+    # the registry: Entrypoint=["certbot"], Cmd=None), so without this override
+    # the container runs bare `certbot`, prints usage and exits -- issuing
+    # nothing and renewing nothing.
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in backend/.env}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:?set CERTBOT_EMAIL in backend/.env}
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    networks:
+      - backend
+    command:
+      - |
+        set -eu
+        # --webroot, never --standalone: nginx owns :80 and must serve the
+        # challenge. That is also why issuance has to be retried here rather
+        # than attempted once -- on a cold start nginx may not be answering yet.
+        trap 'exit 0' TERM INT
+        while :; do
+          if [ -f "/etc/letsencrypt/live/$${DOMAIN}/fullchain.pem" ]; then
+            certbot renew --webroot -w /var/www/certbot --quiet || true
+          else
+            # One attempt per hour. Let's Encrypt allows 5 failed authorizations
+            # per hostname per hour; retrying faster burns that budget on the
+            # same failure and delays recovery.
+            certbot certonly --webroot -w /var/www/certbot \
+              -d "$${DOMAIN}" --email "$${CERTBOT_EMAIL}" \
+              --agree-tos --no-eff-email --non-interactive \
+              --keep-until-expiring || true
+          fi
+          sleep 3600 & wait $$!
+        done
+
+volumes:
+  redis_data:
+  static_data:
+  sqlite_data:
+  hf_cache:
+  certbot_www:
+  certbot_conf:
+
+networks:
+  backend:
+    driver: bridge

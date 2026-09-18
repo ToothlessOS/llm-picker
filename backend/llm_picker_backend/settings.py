@@ -128,7 +128,14 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        # Overridable so a container can put the database on a mounted volume
+        # instead of in the image layer, where it would be discarded on every
+        # recreate. SQLite derives its `-wal` and `-shm` sidecar names from this
+        # path, so the override must point at a *directory* on that volume --
+        # mounting a single file at `BASE_DIR / "db.sqlite3"` cannot work, as the
+        # path is absent from the image and Docker would create a directory
+        # there, which SQLite then refuses to open.
+        "NAME": Path(env("SQLITE_PATH", str(BASE_DIR / "db.sqlite3"))),
         "OPTIONS": {
             # The Celery worker writes while `runserver` reads the same file.
             # Without a busy timeout the reader gets an immediate
@@ -179,7 +186,14 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
+# No change needed: Django prepends the script prefix to this at runtime
+# (`LazySettings._add_script_prefix`), so it reads as "/static/" either way.
 STATIC_URL = "static/"
+
+#: Where `collectstatic` writes. Required -- without it Django raises
+#: `ImproperlyConfigured` and the container cannot start. In the deployed stack
+#: nginx serves this directory from a shared volume at `/static/`.
+STATIC_ROOT = Path(env("DJANGO_STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 
 
 # Email
@@ -269,6 +283,49 @@ LEADERBOARD_THROTTLE_SUSTAINED = env("LEADERBOARD_THROTTLE_SUSTAINED", "2000/day
 #: correct while the app is reached directly. Raise it to the number of proxies
 #: you actually control once one is deployed, never before.
 DJANGO_NUM_PROXIES = env_int("DJANGO_NUM_PROXIES", 0)
+
+
+# --------------------------------------------------------------------------- #
+# Reverse proxy -- every setting here is only true when one is actually in front
+# --------------------------------------------------------------------------- #
+
+if DJANGO_NUM_PROXIES > 0:
+    # Without this, `request.is_secure()` is False for a request the proxy
+    # served over TLS. Two consequences, both bad: `SECURE_SSL_REDIRECT` below
+    # becomes an infinite redirect loop (proxy -> http -> Django -> https ->
+    # proxy -> ...), and `CsrfViewMiddleware._origin_verified` builds
+    # "http://<host>" to compare against the browser's "https://<host>" Origin,
+    # so every admin login POST is rejected with an opaque 403.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+    # Django 4.0+ requires a scheme on each entry and rejects the whole setting
+    # at boot if one is missing (check id `4_0.E001`). Strictly redundant once
+    # the header above is set -- `_origin_verified` would match anyway -- but it
+    # turns an unexplainable CSRF failure on an alias hostname into a fixable
+    # one. Derived from ALLOWED_HOSTS so the two cannot drift apart; the IPv6
+    # literal is skipped because it cannot appear in an Origin.
+    CSRF_TRUSTED_ORIGINS = env_list(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        tuple(f"https://{host}" for host in ALLOWED_HOSTS if not host.startswith("[")),
+    )
+
+
+# The deployed mode. `manage.py check --deploy` reports W004/W008/W009/W012/W016
+# against the defaults of exactly these settings, which is what this block
+# clears; run it before the first deploy.
+if not DEBUG:
+    # Safe to enable only in combination with `SECURE_PROXY_SSL_HEADER` above.
+    SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", True)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    # Zero by default, and that default is deliberate. HSTS is effectively
+    # irreversible for a returning visitor -- a browser that has seen a
+    # max-age refuses plaintext to this host for that long, and it cannot be
+    # taken back early. Raise it to 31536000 only once TLS is proven end to end.
+    SECURE_HSTS_SECONDS = env_int("DJANGO_SECURE_HSTS_SECONDS", 0)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+    SECURE_HSTS_PRELOAD = env_bool("DJANGO_SECURE_HSTS_PRELOAD", False)
 
 
 # --------------------------------------------------------------------------- #
