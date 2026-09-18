@@ -17,9 +17,11 @@ Throughout this document, replace **`api.example.com`** with your real API hostn
 
 ## 1. Prerequisites
 
-- A server with a public IPv4 address, root or sudo access, and ports **80** and **443** open.
-- A DNS **A record** for `api.example.com` pointing at that address. **Do this first** — Let's Encrypt
-  validates over HTTP, so a certificate cannot be issued until the name resolves.
+- A server with a public IPv4 address and root or sudo access.
+- **An existing reverse proxy (nginx) already serving :80 and :443.** This stack does not terminate TLS
+  itself — it publishes the API on **loopback only** and your proxy fronts it. See §5.
+- A DNS **A record** for `api.example.com` pointing at that address, and a certificate for that name in your
+  proxy. Since Let's Encrypt validates over HTTP, the name must resolve before a certificate can be issued.
 - Docker Engine with the Compose v2 plugin (**≥ 2.20**, for `--wait` and `-T`).
 
 Verify DNS before going further:
@@ -27,6 +29,12 @@ Verify DNS before going further:
 ```bash
 dig +short api.example.com     # must print your server's IP
 ```
+
+> **Why there is no nginx or certbot in this stack.** Let's Encrypt's HTTP-01 challenge requires serving
+> `/.well-known/acme-challenge/` on port **80**. If another service already owns that port, an in-stack ACME
+> client can never validate — the certificate would never be issued, and the failure is a confusing retry loop
+> rather than a clear error. Reusing the proxy that already has a certificate avoids the problem entirely and
+> removes two containers, two volumes and a TLS bootstrap phase.
 
 ---
 
@@ -43,7 +51,8 @@ docker compose version        # must be >= 2.20
 sudo adduser --disabled-password --gecos "" deploy
 sudo usermod -aG docker deploy
 
-# Firewall
+# Firewall. 80/443 are for your existing reverse proxy, not for this stack --
+# it publishes nothing but 127.0.0.1:8000, which no firewall rule can expose.
 sudo ufw allow 22/tcp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
 sudo ufw enable
 
@@ -79,8 +88,9 @@ DJANGO_SECRET_KEY=<generate one, below>
 
 # --- Deployment ------------------------------------------------------------
 DOMAIN=api.example.com
-CERTBOT_EMAIL=you@example.com
 ```
+
+There is no `CERTBOT_EMAIL`: TLS belongs to your host proxy (§5), not to this stack.
 
 Generate the secret key with:
 
@@ -116,18 +126,22 @@ sudo -u deploy docker compose up -d --build
 Containers start in a defined order:
 
 1. **`redis`** becomes healthy.
-2. **`init`** runs once and exits: `check --deploy`, then `migrate`, then `collectstatic`. It is a one-shot
-   service on purpose — `web`, `worker` and `beat` share one image, and letting each migrate on start would
-   mean three concurrent writers to one SQLite file.
+2. **`init`** runs once and exits: `check --deploy`, then `migrate`. It is a one-shot service on purpose —
+   `web`, `worker` and `beat` share one image, and letting each migrate on start would mean three concurrent
+   writers to one SQLite file. (`collectstatic` is not here; it runs at image build time and WhiteNoise serves
+   the result out of the image.)
 3. **`web`**, **`worker`** and **`beat`** start, gated on `init` exiting **0**.
-4. **`nginx`** starts HTTP-only, because no certificate exists yet.
-5. **`certbot`** requests a certificate, retrying hourly until nginx can answer the challenge.
+
+`web` publishes **`127.0.0.1:8000` only** — reachable from your proxy on the same host, and from nowhere on
+the internet. That is deliberate: publishing on `0.0.0.0` would let clients bypass the proxy, losing TLS and
+making every request appear to come from the proxy's own IP for rate-limiting purposes.
 
 Check it:
 
 ```bash
 sudo -u deploy docker compose ps        # init must read "exited (0)"; web must be "healthy"
-sudo -u deploy docker compose logs init # migrate + collectstatic output
+sudo -u deploy docker compose logs init # check --deploy + migrate output
+curl -s -H 'Host: api.example.com' http://127.0.0.1:8000/api/v1/leaderboard/metadata/ | head -c 300
 ```
 
 Then seed the database. **The API serves an empty board until this runs:**
@@ -146,40 +160,78 @@ volume, so later container recreations do not re-download it.
 
 ---
 
-## 5. TLS
+## 5. TLS and the host proxy
 
-Nothing to do — this is automatic.
+TLS is terminated by your existing nginx. Add a server block for `api.example.com`:
 
-`nginx` starts with the HTTP-only config, because a `listen 443 ssl` block whose certificate does not exist is
-a **fatal** nginx error, not a warning: nginx would crash-loop and could never serve the ACME challenge that
-obtains the certificate. `docker/nginx/10-select-config.sh` picks the config based on whether the certificate
-exists, and re-checks every 6 hours, promoting nginx to TLS as soon as `certbot` succeeds.
+```nginx
+# HTTP: redirect everything to HTTPS. Keep your existing ACME location block here
+# if this host runs certbot -- it must stay on port 80 to serve renewals.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name api.example.com;
 
-To skip the wait once the certificate has been issued:
+    location / { return 301 https://$host$request_uri; }
+}
 
-```bash
-sudo -u deploy docker compose restart nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;                      # not `listen 443 ssl http2`, deprecated since nginx 1.25.1
+    server_name api.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    location / {
+        # Bare form -- no trailing path, or nginx rewrites the URI and every
+        # endpoint 404s.
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+    }
+}
 ```
 
-Confirm which phase nginx is in:
+Then `sudo nginx -t && sudo systemctl reload nginx`.
 
-```bash
-sudo -u deploy docker compose exec nginx nginx -T | grep -c 'listen 443'   # 0 = HTTP, 1 = TLS
-```
+Three of those headers are load-bearing:
 
-**Renewal** is handled by the `certbot` service, which loops: it renews when a lineage exists and re-attempts
-issuance hourly when one does not. Certificates live in the `certbot_conf` volume.
+- **`X-Forwarded-Proto $scheme`** — without it Django believes every request arrived over plain HTTP. Because
+  `SECURE_SSL_REDIRECT` is on in production, that becomes an **infinite redirect loop**; the admin login also
+  breaks, since Django compares the browser's `https://…` Origin against the `http://…` it reconstructed.
+- **`X-Forwarded-For $proxy_add_x_forwarded_for`** — this **appends** the client address rather than replacing
+  the header. DRF reads the *rightmost* entry (that is what `DJANGO_NUM_PROXIES=1` selects), so a client that
+  sends a fabricated header cannot escape its rate-limit bucket. Do **not** use `$http_x_forwarded_for` here,
+  which would pass a client-controlled value straight through.
+- **`Host $host`** — `DJANGO_ALLOWED_HOSTS` is checked against it. Getting this wrong yields `400
+  DisallowedHost` on every request, which `manage.py check --deploy` does **not** catch.
 
-> Do **not** run `docker compose down -v`: that deletes the certificate volume, and Let's Encrypt allows only
-> **5 duplicate certificates per week**, so a few debugging cycles can lock you out. If you are debugging DNS
-> and expect failures, point certbot at the staging CA instead by appending
-> `--server https://acme-staging-v02.api.letsencrypt.org/directory` to the `certbot certonly` line in the
-> `certbot` service's command in `docker-compose.yml`. Staging certificates are not trusted by browsers, so
-> remove that flag once issuance works.
+No `/static/` location is needed. WhiteNoise serves it from inside the container, so it reaches the browser
+through this same `location /`.
+
+**Renewal** stays with whatever already renews your certificates — this stack has no ACME client by design
+(§1).
+
+> If your nginx runs on a **different host** from Docker, `127.0.0.1:8000` is not reachable. Change the publish
+> in `docker-compose.yml` to that host's private address — e.g. `"10.0.0.5:8000:8000"` — and never to
+> `0.0.0.0`, which would expose the API directly to the internet and defeat both TLS and per-client throttling.
 
 ---
 
 ## 6. Verify end to end
+
+These go through your proxy and TLS, unlike the loopback check in §4. If §4 passes and these fail, the problem
+is the proxy config (§5), not the application.
 
 ```bash
 cd /opt/llm-picker/backend
@@ -215,8 +267,10 @@ machine make ~70 requests in a minute and check that **that** machine starts get
 `DJANGO_NUM_PROXIES` is not `1`.
 
 > `DJANGO_NUM_PROXIES=1` is load-bearing, not a tuning knob. At `0` DRF's `get_ident` returns `REMOTE_ADDR`
-> and **never reads `X-Forwarded-For`** — which behind nginx is nginx's *container* IP, identical for every
-> visitor. The 60/min and 2000/day budgets would then apply to the whole internet at once.
+> and **never reads `X-Forwarded-For`**. Because `web` publishes on loopback and every request arrives via the
+> host proxy, `REMOTE_ADDR` is the same address for every visitor on earth — Docker's bridge gateway. The
+> 60/min and 2000/day budgets would then apply to the whole internet at once, and the first busy minute would
+> take the API down for everyone.
 
 ---
 
@@ -273,11 +327,13 @@ corrupt database.
 
 ## 9. Backups
 
-Two things are irreplaceable:
+One thing is irreplaceable:
 
 - **The database** — `sqlite_data` volume. Everything in it except the Django admin user can be rebuilt with
   `manage.py refresh_leaderboard`, so back it up mainly to preserve admin accounts and `ModelAlias` edits.
-- **`certbot_conf`** — losing it forces re-issuance against a 5-per-week limit.
+
+The other volumes (`redis_data`, `hf_cache`) are pure caches — Redis holds only counters and locks, and the
+HuggingFace cache re-downloads. Certificates are your host proxy's concern, not this stack's.
 
 Take one **before any deploy that runs migrations**:
 
@@ -315,8 +371,10 @@ network filesystems.
 | API returns `200` but the browser shows nothing | CORS. The response is missing `Access-Control-Allow-Origin` — check the origin is bare (no path, no trailing slash). |
 | Frontend shows an empty board | The backend has not been seeded, or `VITE_API_BASE_URL` points somewhere else. |
 | Board never updates | `worker`/`beat` are not running, or `REDIS_URL` cannot reach the `redis` service. |
-| nginx serves the default welcome page | `10-select-config.sh` is not executable, so the entrypoint silently skipped it. `chmod +x backend/docker/nginx/10-select-config.sh`. |
-| No certificate after several minutes | DNS not resolving, or port 80 blocked. Check `docker compose logs certbot`. |
+| Browser shows a redirect loop / `ERR_TOO_MANY_REDIRECTS` | Your proxy is not sending `X-Forwarded-Proto: https`, so Django sees plaintext and `SECURE_SSL_REDIRECT` bounces it back. See §5. |
+| Admin login returns `403 CSRF verification failed` | Same cause as above — Django compares the Origin against the scheme it reconstructed. |
+| `502 Bad Gateway` from your proxy | `web` is not healthy. `docker compose ps` and `docker compose logs web`. |
+| Static files (`/static/…`) 404 | `collectstatic` did not run at image build. Rebuild: `docker compose build web`. |
 | Rate limiting appears to do nothing | `REDIS_URL` is wrong; throttling fails open. See §6. |
 | `database is locked` | Should not happen — WAL plus a 20s busy timeout plus `IMMEDIATE` transactions are configured. If it does, something is writing outside Celery. |
 

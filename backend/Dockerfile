@@ -43,6 +43,17 @@ COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . /app/
+
+# collectstatic at BUILD time is correct *here specifically* because nothing
+# mounts over STATIC_ROOT -- WhiteNoise serves it straight out of the image. If
+# a shared static volume were mounted at /app/staticfiles this would be a trap:
+# Docker copies image content into a named volume only on first creation, so the
+# tree would be correct once and silently stale on every later `up`.
+#
+# Absolute interpreter path because PATH is not set to the venv until further
+# down; a bare `python` here would be the system one, which has no Django.
+RUN /app/.venv/bin/python manage.py collectstatic --noinput
+
 # The exec bit on entrypoint.sh is restored here rather than relied upon from
 # the build context: a fresh clone or an archive transfer can drop it, and the
 # failure ("permission denied" from the container runtime) is not obvious.

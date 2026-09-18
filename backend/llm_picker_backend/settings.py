@@ -89,6 +89,16 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Directly after SecurityMiddleware, per the WhiteNoise docs, so a static
+    # file is answered before CORS, sessions or the URL resolver ever see it.
+    # Under DEBUG it proxies to the staticfiles finders; otherwise it serves
+    # STATIC_ROOT from a dictionary built once at startup.
+    #
+    # This is what serves /static/ in the deployed stack. It previously came from
+    # nginx reading a shared volume, which meant a second container, a volume and
+    # a collectstatic that had to run on every `up`. WhiteNoise removes all three:
+    # the assets are baked into the image alongside the code they belong to.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     # CorsMiddleware must precede CommonMiddleware so that CORS headers survive
     # a redirect or a 404 produced by the common middleware.
     "corsheaders.middleware.CorsMiddleware",
