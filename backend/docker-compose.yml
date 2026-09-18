@@ -19,9 +19,12 @@
 # someone forgot a line.
 
 x-app: &app
-  build:
-    context: .
-    dockerfile: Dockerfile
+  # NOTE: no `build:` here, deliberately. `init`, `web`, `worker` and `beat` all
+  # run the same image, but only ONE service may declare how to build it --
+  # `docker compose build` builds every service that has a build section, and
+  # four of them exporting to the same tag in parallel makes BuildKit fail with
+  #   failed to solve: image "…/llm-picker-api:latest": already exists
+  # The build lives on `web` alone; the other three reference the tag it produces.
   image: llm-picker-api:latest
   restart: unless-stopped
   env_file:
@@ -105,6 +108,10 @@ services:
 
   web:
     <<: *app
+    # The only build in this file. See the note on `x-app`.
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       init:
         condition: service_completed_successfully
