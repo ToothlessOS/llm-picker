@@ -363,7 +363,9 @@ def rebuild_matches(
             lmarena_entry=entry,
             model=model,
             match_method=claim.method,
-            confidence=1.0 if claim.rank <= 3 else 0.75,
+            # `<= 4` covers alias, both verbatim rungs and `exact_effort_slug`;
+            # only `harness_fold` (rank 5) is an inference. See `Claim.rank`.
+            confidence=1.0 if claim.rank <= 4 else 0.75,
             is_manual=claim.method == "alias",
             matched_key=claim.matched_key,
             last_matched_at=synced_at,

@@ -64,8 +64,9 @@ latency / throughput → `FloatField`**. Upstream `null` maps to DB `NULL` and
 
 ## The matching ladder
 
-Deterministic, conservative, and identical for all three joins. No similarity
-scoring anywhere.
+Deterministic, conservative, and no similarity scoring anywhere. The rungs below
+are shared; the AA↔agent join adds two of its own in the positions noted in
+[rung order](#rung-order-name-before-slug).
 
 1. **Alias override** — a `ModelAlias` row wins outright.
 2. **Exact normalized key** — a unique hit matches; **multiple hits refuse** and
@@ -73,7 +74,15 @@ scoring anywhere.
 3. **Harness-wrapper fold** — strip one whole trailing token from a tiny,
    evidence-based list (`codex-harness`), only when it yields exactly one
    candidate, guarded by a sibling check. See
-   [data-sources.md](data-sources.md#4-the-only-inference-the-harness-fold).
+   [data-sources.md](data-sources.md#the-harness-fold).
+4. **Stated-effort slug** *(AA↔agent only)* — AA's slug with the effort level its
+   `name` explicitly states appended. See
+   [data-sources.md](data-sources.md#the-stated-effort-rung--exact_effort_slug).
+
+Rungs 3 and 4 both derive the key they compare against rather than reading one
+verbatim. Neither invents a candidate: each re-spells one a source already
+stated. Only rung 3 is an *inference*, and it is the only one whose matches carry
+`confidence < 1.0`.
 
 ### Rung order: `name` before `slug`
 
@@ -93,6 +102,20 @@ gpt-5-5         -> (no match)          <- and reported by name, see below
 The slug rung remains necessary for records whose name carries no effort marker
 at all (`mimo-v2-5-pro` → `"MiMo-V2.5-Pro"`), where it is safe.
 
+**Between** the slug rung and the harness fold sits the **stated-effort rung**,
+which is what resolves AA's verbose prose dialect. AA names the level in prose and
+publishes that variant under the bare slug, while LMArena keys it with a suffix:
+
+```
+claude-opus-5-max  -> 'Claude Opus 5 (Adaptive Reasoning, Max Effort)'  via exact_effort_slug
+```
+
+`has_effort_marker` cannot see that prose, so the name rung misses and the slug
+rung tries the bare `claude-opus-5` — which LMArena does not publish. The rung
+appends the level AA stated, producing a key strictly *more specific* than the
+slug, so unlike the fold it cannot reach a different effort level and needs no
+sibling check.
+
 ### Reasoning effort is never folded
 
 Covered in full in [data-sources.md](data-sources.md#rejected-folding-reasoning-effort).
@@ -100,35 +123,52 @@ The short version: simulating an effort fold on real data produced exactly one
 match and it was **wrong** (`gpt-5.5-high` → `"GPT 5.5"` when `"GPT 5.5 (xHigh)"`
 is the true sibling), and zero correct ones. A regression test pins it.
 
+Folding *removes* a level. The stated-effort rung *adds* one the source itself
+named, which is the difference between inferring an equivalence and reading an
+explicit statement. It therefore does not reopen the fold.
+
 **Consequence, by design:** a LMArena variant with no AA counterpart at the
-*same* effort level (`Claude Fable 5.1 (Max)` — AA publishes base/`low`/`medium`
-only) stays unmatched. Inheriting another level's numbers would be worse than a
-visible gap.
+*same* effort level stays unmatched. `Claude Fable 5 (High)` is the live example —
+AA publishes Fable 5 at Max Effort only. Inheriting another level's numbers would
+be worse than a visible gap; an alias is the escape hatch when a human decides
+otherwise.
 
 ---
 
-## Measured results (live data, 2026-09-11)
+## Measured results (live data, 2026-09-18 sync)
+
+The matched figures below are the post-stated-effort-rung state of the ladder. The
+served join comes from the stored `ModelMatch` table, so `/overview/` reflects
+them from the next AA refresh onwards — see
+[alias promotion](#1-alias-promotion-takes-a-refresh-not-a-request), which is the
+same mechanism.
 
 | | Count |
 |---|---|
-| AA records fetched | 646 (4 pages) |
-| AA records retained (in the agent set) | 30 |
-| LMArena `agent` models | 43 |
-| …with an AA match → shipped by `/overview/` | **30** |
-| …with no AA match → `/unmatched/?reason=no_aa_match` | 13 |
+| AA records fetched | 652 (4 pages) |
+| AA records retained (in the agent set) | 35 |
+| LMArena `agent` models | 46 |
+| …with an AA match → shipped by `/overview/` | **35** |
+| …with no AA match → `/unmatched/?reason=no_aa_match` | 14 → **11** |
 
-| Category | Rows | Distinct models | In `agent` set |
-|---|---|---|---|
-| `agent` | 43 | 43 | 43 |
-| `document` | 38 | 38 | 12 |
-| `search` | 34 | 34 | 2 |
-| `webdev` | 535 | **127** | 35 |
+Matches by rung: **27** `exact_name`, **5** `exact_slug`, **3**
+`exact_effort_slug` (the three rows this rung was added for), **0**
+`harness_fold` on the AA side.
 
-Ledger: **615** `no_lmarena_match`, **150** `not_in_agent_set`, **126**
-`duplicate_model_name`, **13** `no_aa_match`, **1** `ambiguous_match` — 905
+| Category | Stored rows (post-dedupe) | In `agent` set |
+|---|---|---|
+| `agent` | 46 | 46 |
+| `document` | 44 | 17 |
+| `search` | 34 | 2 |
+| `webdev` | 128 | 37 |
+
+Ledger: **615** `no_lmarena_match`, **149** `not_in_agent_set`, **128**
+`duplicate_model_name`, **11** `no_aa_match`, **1** `ambiguous_match` — 904
 current records.
 
-The 535→127 webdev collapse is the dedupe doing real work, not bookkeeping.
+Dedupe is doing real work rather than bookkeeping: the stored `webdev` count is
+what survives several upstream rows per model collapsing onto one key (535 raw
+rows → 127 models at the 2026-09-11 sync).
 
 ---
 
@@ -362,9 +402,9 @@ one row per unmatched agent model during the AA matching phase, teaching
 `no_aa_match` 404 at the new record. The live 13 now report as:
 
 ```
-| lmarena | agent | no_aa_match | GPT 5.5                | `gpt-5-5`                | 1 | {"rank": 18, "aa_records_considered": 646} |
-| lmarena | agent | no_aa_match | Claude Opus 5 (Max)    | `claude-opus-5-max`      | 1 | {"rank": 4,  "aa_records_considered": 646} |
-| ... 11 more
+| lmarena | agent | no_aa_match | Claude Fable 5 (High)  | `claude-fable-5-high`    | 3 | {"rank": 5,  "aa_records_considered": 652} |
+| lmarena | agent | no_aa_match | GPT 5.5                | `gpt-5-5`                | 3 | {"rank": 20, "aa_records_considered": 652} |
+| ... 9 more
 ```
 
 `aa_records_considered` is what makes the review question answerable: it records
@@ -381,18 +421,25 @@ vanish from the report. Proved by reverting the scoping: the
 disappear. `test_the_two_ledgers_do_not_close_each_others_rows` pins all three
 directions.
 
-### 4. AA↔agent coverage is 30/43, not the projected ~34/43
+### 4. AA↔agent coverage is 35/46, not the projected ~34/43
 
 The design projected ~34 agent models matched, measured "under exact-normalized
 matching" with slug-or-name matching, and asked for the figure to be re-measured
 once the rung order was corrected — warning that it could stay "similar" with the
 difference being *correct* rather than *more* matches.
 
-It came out at **30**. The direction of the warning was right; the magnitude was
--4. The corrected rung order attaches effort-specific AA rows to the *correct*
-agent variant, which necessarily leaves the bare base variants (`gpt-5-5`,
-`gpt-5-4-high`, …) unmatched rather than wrongly attached. Those 13 are the
-review queue, and are the reason deviation 3 mattered enough to fix.
+It came out at **30** of the 43 agent models then published, against a catalogue of
+646. The direction of the warning was right; the magnitude was -4. The corrected
+rung order attaches effort-specific AA rows to the *correct* agent variant, which
+necessarily leaves the bare base variants (`gpt-5-5`, `gpt-5-4-high`, …) unmatched
+rather than wrongly attached.
+
+The stated-effort rung later recovered **3** of those, taking it to **35 of 46** —
+but only the three where the two sources actually *agree* on the level and our
+reading of AA's prose was what failed (`claude-opus-5-max`, `claude-fable-5-1-max`,
+`deepseek-v4-1-flash-max`). The remaining **11** are still the review queue, and
+they are still unmatched for the original reason: the sources genuinely disagree,
+or AA lacks the entry. Deviation 3 remains the explanation for most of them.
 
 ### 5. `purge_legacy_tables` was not written
 
@@ -425,9 +472,12 @@ are inert — no model, no migration and no code path refers to them.
   source: search-specialized models genuinely are not in the `agent` split.
 - **Harness-fold matches are inferred joins.** Auditable, individually listed,
   and promotable to explicit aliases.
-- **Reasoning-effort differences are never inferred**, so genuinely related
+- **Reasoning-effort *differences* are never inferred**, so genuinely related
   models stay unmatched until a human aliases them. Unmatched is the correct
-  default when the alternative is a confident wrong answer.
+  default when the alternative is a confident wrong answer. Where the two sources
+  state the *same* level, the stated-effort rung reads it rather than inferring
+  it — the distinction is in
+  [data-sources.md](data-sources.md#rejected-folding-reasoning-effort).
 - **AA quota is 100 requests / 24 h, shared across the whole organization.** A
   full refresh is 4; steady state is 8/day. If the org's other keys spend it,
   scheduled refreshes fail with `rate_limit_exceeded` and the API keeps serving
@@ -437,7 +487,7 @@ are inert — no model, no migration and no code path refers to them.
 - **The battle-count heatmap from the proposal is out of scope**: the leaderboard
   dataset does not publish pairwise comparison counts.
 - **The joined surface is intentionally the smallest of the three.** `/overview/`
-  and `/models/{key}/` show 30 entries; `/categories/{category}/` and
+  and `/models/{key}/` show 35 entries; `/categories/{category}/` and
   `/artificial-analysis/` show more, being single-source views. If the frontend
   needs a model that is not on `/overview/`, the honest fix is a `ModelAlias` —
   not a query parameter that relaxes the completeness rule.

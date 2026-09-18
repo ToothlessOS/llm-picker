@@ -105,6 +105,138 @@ class TestAaRungOrder:
         assert not outcome.is_match
 
 
+class TestAaStatedEffortSlugRung:
+    """AA states an effort in verbose prose; the key it publishes omits it.
+
+    AA's max-effort variant is published under the **bare** slug while LMArena
+    keys it `-max`, so neither the name rung nor the slug rung can reach it. These
+    are the three real rows that motivated the rung, plus the refusals that must
+    survive it.
+    """
+
+    @pytest.mark.parametrize(
+        ("lmarena_name", "aa_name", "aa_slug", "expected_key"),
+        [
+            (
+                "Claude Fable 5.1 (Max)",
+                "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)",
+                "claude-fable-5-1",
+                "claude-fable-5-1-max",
+            ),
+            (
+                "Claude Opus 5 (Max)",
+                "Claude Opus 5 (Adaptive Reasoning, Max Effort)",
+                "claude-opus-5",
+                "claude-opus-5-max",
+            ),
+            (
+                "Deepseek V4.1 Flash (Max)",
+                "DeepSeek V4.1 Flash (Reasoning, Max Effort)",
+                "deepseek-v4-1-flash",
+                "deepseek-v4-1-flash-max",
+            ),
+        ],
+    )
+    def test_verbose_prose_resolves_through_the_constructed_slug_key(
+        self, lmarena_name, aa_name, aa_slug, expected_key
+    ):
+        index = agent_index(lmarena_name)
+
+        outcome = match_aa_model(index, name=aa_name, slug=aa_slug)
+
+        assert outcome.is_match
+        assert outcome.method == MatchMethod.EXACT_EFFORT_SLUG.value
+        assert outcome.matched_key == expected_key
+        assert outcome.target.model_name == lmarena_name
+
+    def test_it_never_reaches_across_effort_levels(self):
+        """The refusal the rung must not weaken, with the attempt made visible.
+
+        AA publishes Opus 4.8 at Max only; LMArena's agent split has it at High.
+        The rung does fire -- it builds `claude-opus-4-8-max` -- and the index does
+        not have it, so the record is reported. Attaching the Max numbers to the
+        High entry would be a confident wrong answer.
+        """
+        index = agent_index("Claude Opus 4.8 (High)")
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Opus 4.8 (Adaptive Reasoning, Max Effort)",
+            slug="claude-opus-4-8",
+        )
+
+        assert not outcome.is_match
+        assert outcome.detail["effort"] == "max"
+        assert outcome.detail["effort_key_tried"] == "claude-opus-4-8-max"
+
+    def test_it_does_not_fire_when_the_slug_already_names_the_effort(self):
+        """A slug that already carries the level must not have it appended twice.
+
+        AA's high-effort Claude records resolve on the slug rung; `effort_from_name`
+        also reads `high` from their prose. Without the guard the rung would build
+        `claude-opus-5-high-high`.
+        """
+        index = agent_index("Claude Opus 5 (High)")
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Opus 5 (Adaptive Reasoning, High Effort)",
+            slug="claude-opus-5-high",
+        )
+
+        assert outcome.is_match
+        assert outcome.method == MatchMethod.EXACT_SLUG.value
+        assert outcome.matched_key == "claude-opus-5-high"
+
+    def test_a_product_name_containing_an_effort_word_does_not_construct_a_key(self):
+        """`Qwen3.8 Max` collides with Anthropic's `max` level in the vocabulary.
+
+        `effort_from_name` reports `max`, because that is what the name says. The
+        guard suppresses the construction because the slug already carries the
+        token, so the record resolves on its name and no `-max-0803-max` is tried.
+        """
+        index = agent_index("Qwen3.8 Max")
+
+        outcome = match_aa_model(index, name="Qwen3.8 Max", slug="qwen3-8-max-0803")
+
+        assert outcome.is_match
+        assert outcome.method == MatchMethod.EXACT_NAME.value
+        # The name rung won, so the effort rung was never reached -- and had it
+        # been, the guard would have suppressed it. The nonsense key it would
+        # otherwise have built is absent from the index either way.
+        assert outcome.matched_key == "qwen3-8-max"
+        assert "qwen3-8-max-0803-max" not in index
+
+    def test_the_rung_ranks_below_the_verbatim_rungs_but_above_the_fold(self):
+        """The rank renumbering, pinned. `harness_fold` moved 4 -> 5.
+
+        A constructed key exists in neither source as written, so a record that
+        matched on a spelling upstream actually uses must win the single
+        `ModelMatch` slot.
+        """
+        claims = [
+            Claim(
+                matched_key="shared-key",
+                method=MatchMethod.EXACT_EFFORT_SLUG.value,
+                model=object(),
+                name="Constructed",
+                slug="shared",
+            ),
+            Claim(
+                matched_key="shared-key",
+                method=MatchMethod.EXACT_NAME.value,
+                model=object(),
+                name="Verbatim",
+                slug="other",
+            ),
+        ]
+
+        winners, losers = resolve_collisions(claims)
+
+        assert winners["shared-key"].method == MatchMethod.EXACT_NAME.value
+        assert [loser.method for loser, _ in losers] == [MatchMethod.EXACT_EFFORT_SLUG.value]
+
+
 class TestAaAntiFuzzy:
     """Near misses must not match. The whole point of dropping fuzzy scoring.
 

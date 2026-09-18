@@ -160,17 +160,18 @@ axis.
 The `agent` split uses display names (`"Claude Opus 5 (High)"`, `"GPT 5.6 Sol
 (xHigh)"`) while the other three use slugs (`claude-opus-5-high`,
 `gpt-5.6-sol-xhigh`). **Exact string matching between them yields a zero
-intersection.** The normalizer recovers it: 12/38 `document`, 2/34 `search` and
-35/127 `webdev` models are reachable from the `agent` set.
+intersection.** The normalizer recovers it: 17/44 `document`, 2/34 `search` and
+37/128 `webdev` models are reachable from the `agent` set.
 
-`search` intersecting to 2 and `document` to 12 is **inherent to the source, not
+`search` intersecting to 2 and `document` to 17 is **inherent to the source, not
 a defect**: search-specialized models (`gpt-5-search`,
 `claude-opus-4-6-search`) genuinely do not exist in the `agent` split.
 
 ### Duplicate rows — `webdev` repeats models
 
-`webdev` is **535 rows but only 127 distinct models** — each repeated up to 9×
-with *inconsistent ranks* (`claude-opus-5-max` appears at ranks 3, 1, 3, 2, 3).
+`webdev` repeats each model several times (at the 2026-09-11 sync, **535 raw rows
+for 127 distinct models**, each repeated up to 9×) with *inconsistent ranks*
+(`claude-opus-5-max` appears at ranks 3, 1, 3, 2, 3).
 Dedupe by normalized key is mandatory, not a nicety: a naive unique constraint
 would crash the refresh.
 
@@ -210,9 +211,14 @@ the test suite asserts exactly that.
 
 ---
 
-## 4. The only inference: the harness fold
+## 4. The two derived rungs
 
-One exception exists, and it is tightly bounded.
+Two rungs derive the key they compare against. Both are tightly bounded, and
+neither invents a candidate — each only **re-spells one a source already stated**.
+Every match either produces is recorded with the rung that produced it, so the
+whole class is auditable and promotable to explicit aliases.
+
+### The harness fold
 
 Some LMArena rows name a model *wrapped in an evaluation harness* rather than a
 different model — `gpt-5.6-sol-xhigh (codex-harness)` is `GPT 5.6 Sol (xHigh)`
@@ -223,9 +229,32 @@ the only one observed in the real data.
 It fires only when it yields **exactly one** candidate, and it is **guarded by a
 sibling check**: if the fold's target base has more-specific variants present in
 the index, it refuses rather than guessing. It correctly recovers 6 real webdev
-models. Every fold match is recorded with its target and the stripped token, so
-the whole inferred class is auditable and promotable to explicit aliases. Behind
-`LEADERBOARD_ENABLE_HARNESS_FOLD` (default on).
+models. Every fold match is recorded with its target and the stripped token.
+Behind `LEADERBOARD_ENABLE_HARNESS_FOLD` (default on). This is the only rung that
+is genuinely an *inference*, and the only one whose matches carry
+`confidence < 1.0`.
+
+### The stated-effort rung — `exact_effort_slug`
+
+AA states a reasoning level in `name` and publishes that variant under a slug that
+does not carry it, while LMArena keys it with a suffix:
+
+| AA slug | AA name | LMArena agent key |
+|---|---|---|
+| `claude-opus-5` | `Claude Opus 5 (Adaptive Reasoning, Max Effort)` | `claude-opus-5-max` |
+
+`has_effort_marker` cannot see that prose (the name ends in `effort`, not an
+effort word), so the name rung misses and the slug rung tries the bare
+`claude-opus-5`, which LMArena does not publish. `effort_from_name` reads the
+level **AA explicitly states** and the rung appends it.
+
+This is not the rejected effort fold in disguise, and the distinction is the whole
+reason it is safe. The fold *removed* a token and could therefore land on a
+different level; this rung *adds* the level the source itself named, producing a
+key strictly **more specific** than the record's slug. It is structurally unable
+to reach across effort levels, which is also why it needs none of the fold's
+sibling shadowing check. It requires the word `Effort` to be present — a bare
+`(Adaptive Reasoning, Max)` mid-name states nothing and is refused.
 
 ### Rejected: folding reasoning effort
 
@@ -236,11 +265,12 @@ sibling — and **zero correct ones**. Reasoning effort is part of a model's
 identity, not a wrapper around it. The fold is gone, and a regression test pins
 that it stays gone.
 
-Nothing is lost by this: AA and LMArena already use the *same* effort tokens
-(`(xhigh)` ↔ `(xHigh)`), so they align exactly without folding. The models where
-they do not agree — e.g. `Claude Fable 5.1 (Max)`, where AA publishes only
-base/`low`/`medium` — stay **unmatched by design**. Inheriting a different
-effort level's numbers would be actively misleading; a visible gap is not.
+The models where the two sources genuinely **disagree** about the level stay
+**unmatched by design**. `Claude Fable 5 (High)` is the example: AA publishes
+Fable 5 at Max Effort only, so the High row has no counterpart and inheriting the
+Max numbers would be actively misleading. A visible gap is not. What the
+stated-effort rung fixes is the narrower case where the sources *agree* and only
+our reading of AA's prose was failing.
 
 ---
 

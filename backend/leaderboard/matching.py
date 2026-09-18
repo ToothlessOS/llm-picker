@@ -7,9 +7,12 @@ Design constraints, in priority order:
    can tell. Every rung either produces a single unambiguous candidate or the
    record is reported as unmatched.
 2. **No fuzzy matching.** Only exact equality of *normalized* keys is compared.
-   The one relaxation is a harness-wrapper fold that removes a single trailing
-   token from a published constant list, and it fires only on a unique,
-   unshadowed candidate.
+   Two rungs derive the key they compare against, and both fire only on an exact,
+   unique hit: the harness-wrapper fold, which removes a single trailing token
+   from a published constant list; and the stated-effort rung, which appends the
+   effort level AA's *name* explicitly states to AA's slug (see
+   `match_aa_model`). Neither invents a candidate -- they only re-spell one the
+   source already stated.
 3. **Every decision is auditable.** Each match records the rung that produced
    it, so an entire class of inferred joins can be reviewed and promoted to
    explicit, human-confirmed aliases.
@@ -27,7 +30,12 @@ from .constants import (
     Source,
     UnmatchedReason,
 )
-from .normalization import harness_fold, has_effort_marker, normalize_model_key
+from .normalization import (
+    effort_from_name,
+    harness_fold,
+    has_effort_marker,
+    normalize_model_key,
+)
 
 MatchStatus = Literal["matched", "unmatched", "ambiguous", "missing_identity"]
 
@@ -270,6 +278,27 @@ def match_aa_model(
     resolves it correctly. The slug remains necessary for records whose name
     carries no effort marker at all (``mimo-v2-5-pro`` -> ``"MiMo-V2.5-Pro"``),
     where it is safe, and it is skipped entirely otherwise.
+
+    The final exact rung covers the case the two above cannot reach: AA states an
+    effort in *verbose prose* and publishes that variant under the **bare** slug,
+    while LMArena keys it with a suffix.
+
+    ================  ==========================================  ==================
+    AA slug           AA name                                     agent key
+    ================  ==========================================  ==================
+    ``claude-opus-5``  ``Claude Opus 5 (Adaptive Reasoning, …``   ``claude-opus-5-max``
+
+    ``has_effort_marker`` cannot see that prose (it ends in ``effort``, not an
+    effort word), so the name rung misses and the slug rung -- which is *not*
+    skipped, for the same reason -- tries the bare ``claude-opus-5``, which
+    LMArena does not have. ``effort_from_name`` reads the stated level and the
+    rung appends it.
+
+    This does not weaken the guarantee above, because it never consults the bare
+    slug as an answer: it only compares against ``<slug>-<stated effort>``, which
+    is strictly *more* specific than the record's slug. It is therefore
+    structurally unable to land on a different effort level, which is why it
+    needs none of the sibling shadowing check ``MatchIndex.folded`` requires.
     """
     name_key = normalize_model_key(name)
     slug_key = normalize_model_key(slug)
@@ -316,6 +345,29 @@ def match_aa_model(
         if outcome.status == "ambiguous":
             return outcome
 
+    # Rung: AA's slug with the effort level its name states appended. For the
+    # verbose prose dialect, where AA maps the stated level to the bare slug and
+    # LMArena keys it with a suffix.
+    effort = effort_from_name(name)
+    # Guard on token containment, not a suffix test: when the slug already names
+    # the effort ("qwen3-8-max-0803", "…-non-reasoning-low-effort") appending it
+    # again builds nonsense.
+    effort_key = (
+        f"{slug_key}-{effort}"
+        if effort and slug_key and f"-{effort}-" not in f"-{slug_key}-"
+        else None
+    )
+    if effort_key:
+        outcome = index.exact(effort_key)
+        if outcome.is_match:
+            return replace(
+                outcome,
+                method=MatchMethod.EXACT_EFFORT_SLUG.value,
+                detail={**outcome.detail, "effort": effort, "effort_key": effort_key},
+            )
+        if outcome.status == "ambiguous":
+            return outcome
+
     # Rung: harness wrapper, on whichever keys were permitted.
     for candidate in filter(None, (name_key, slug_key if slug_allowed else None)):
         outcome = index.folded(candidate)
@@ -330,6 +382,14 @@ def match_aa_model(
             "slug_key": slug_key,
             "name_states_effort": name_states_effort,
             "slug_rung_skipped": bool(slug_key) and name_states_effort,
+            # Reported separately, and only when each is true: `effort` when the
+            # name stated a level, `effort_key_tried` only when the rung actually
+            # consulted a key. A record whose slug already names the effort has
+            # the first but not the second, and must not claim an attempt the
+            # guard suppressed. Also keeps the sample rows in
+            # `docs/unmatched-report.md`, which state no effort, unembellished.
+            **({"effort": effort} if effort else {}),
+            **({"effort_key_tried": effort_key} if effort_key else {}),
         },
     )
 
@@ -356,7 +416,14 @@ class Claim:
 
     @property
     def rank(self) -> int:
-        """Lower is better. Encodes the deterministic tie-break order."""
+        """Lower is better. Encodes the deterministic tie-break order.
+
+        `exact_effort_slug` outranks `harness_fold` because it re-spells a level
+        the source stated rather than inferring one from a wrapper token. It sits
+        below the two verbatim rungs: the key it matched exists in neither source
+        as written, so a record that matched on a spelling upstream actually uses
+        should win.
+        """
         if self.method == MatchMethod.ALIAS.value:
             return 0
         if self.slug_is_key:
@@ -365,7 +432,9 @@ class Claim:
             return 2
         if self.method == MatchMethod.EXACT_SLUG.value:
             return 3
-        return 4  # harness fold -- inferred
+        if self.method == MatchMethod.EXACT_EFFORT_SLUG.value:
+            return 4
+        return 5  # harness fold -- inferred
 
 
 def resolve_collisions(claims: Iterable[Claim]) -> tuple[dict[str, Claim], list[tuple[Claim, Claim]]]:

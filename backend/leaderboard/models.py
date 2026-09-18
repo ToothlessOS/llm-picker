@@ -217,7 +217,11 @@ class ModelMatch(models.Model):
         related_name="lmarena_match",
     )
     match_method = models.CharField(max_length=32, choices=MatchMethod.choices)
-    #: 1.0 for exact and alias matches; below 1.0 for inferred (fold) matches.
+    #: 1.0 for matches whose key the sources themselves state -- the exact rungs,
+    #: aliases, and `exact_effort_slug` (the key is constructed, but every part of
+    #: it is stated: AA names the level, LMArena's suffix names it too, and the
+    #: result cannot land on a different level). Below 1.0 for `harness_fold`,
+    #: which strips a wrapper token and so genuinely infers.
     confidence = models.FloatField(default=1.0)
     #: True when a human wrote the alias that produced this match.
     is_manual = models.BooleanField(default=False)

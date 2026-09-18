@@ -23,7 +23,7 @@ import pytest
 from leaderboard.clients.artificial_analysis import ArtificialAnalysisClient
 from leaderboard.clients.http import RetryPolicy
 from leaderboard.clients.lmarena import LMArenaClient, LoadedSplit
-from leaderboard.constants import Source, SyncStatus, UnmatchedReason
+from leaderboard.constants import MatchMethod, Source, SyncStatus, UnmatchedReason
 from leaderboard.models import LLMModel, LMArenaEntry, ModelMatch, SyncRun, UnmatchedRecord
 from leaderboard.services import refresh
 from leaderboard.tests.fakes import (
@@ -465,6 +465,46 @@ class TestMatchingPersisted:
 
         assert ModelMatch.objects.count() == 1
         assert ModelMatch.objects.get().lmarena_entry.model_name == "Claude Opus 5 (Low)"
+
+    def test_the_stated_effort_rung_keeps_full_confidence(self):
+        """The rank->confidence mapping, end to end. Inherited from the ladder.
+
+        `Claim.rank` gained a rung and `harness_fold` moved 4 -> 5, so the
+        confidence threshold moved with it. Without this test the renumbering is
+        invisible: an off-by-one would silently label the constructed-effort join
+        as an inference, or promote the harness fold to 1.0, in the public API.
+        """
+        refresh.refresh_lmarena(
+            client=lmarena_client(agent=[agent_row("Claude Opus 5 (Max)"), agent_row("Hy3", rank=2)]),
+            use_lock=False,
+        )
+        refresh.refresh_aa(
+            client=aa_client(
+                aa_page(
+                    [
+                        aa_model(
+                            "uuid-stated",
+                            "claude-opus-5",
+                            "Claude Opus 5 (Adaptive Reasoning, Max Effort)",
+                        ),
+                        # The slug carries the wrapper too, so neither the name nor
+                        # the slug rung can resolve it -- only the fold can.
+                        aa_model("uuid-folded", "hy3-codex-harness", "Hy3 (codex-harness)"),
+                    ]
+                )
+            ),
+            use_lock=False,
+        )
+
+        stated = ModelMatch.objects.get(match_method=MatchMethod.EXACT_EFFORT_SLUG.value)
+        assert stated.matched_key == "claude-opus-5-max"
+        assert stated.confidence == 1.0
+        assert stated.is_manual is False
+
+        # The other side of the threshold, so an off-by-one is caught either way.
+        folded = ModelMatch.objects.get(match_method=MatchMethod.HARNESS_FOLD.value)
+        assert folded.matched_key == "hy3"
+        assert folded.confidence == 0.75
 
     def test_an_unmatched_aa_record_is_retained_only_if_it_won(self):
         """`is_retained` is membership in the agent subset, not merely "matched"."""

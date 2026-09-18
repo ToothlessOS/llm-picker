@@ -138,6 +138,12 @@ class MatchMethod(models.TextChoices):
     #: Exact equality against AA's `slug`. Only consulted when the name carries
     #: no reasoning-effort marker -- see `matching.py` for why the order matters.
     EXACT_SLUG = "exact_slug", "Exact AA slug"
+    #: AA's `slug` with the effort level its NAME states appended. Fires only when
+    #: AA names an effort the slug omits, so both sides state the level: AA in
+    #: prose ("(Adaptive Reasoning, Max Effort)"), LMArena in the key ("-max").
+    #: Unlike the harness fold this cannot land on a different effort level, since
+    #: the constructed key is strictly more specific.
+    EXACT_EFFORT_SLUG = "exact_effort_slug", "Exact AA slug + stated effort"
     #: Recovered by stripping one evaluation-harness wrapper token.
     HARNESS_FOLD = "harness_fold", "Harness-wrapper fold"
 
@@ -156,9 +162,11 @@ class MatchMethod(models.TextChoices):
 #: was wrong.
 HARNESS_SUFFIXES: frozenset[str] = frozenset({"codex-harness"})
 
-#: Reasoning-effort markers, used for one thing only: deciding whether AA's bare
-#: `slug` is safe to consult as a fallback (it is not, when the name already
-#: names an effort level).
+#: Reasoning-effort markers. Two readers use these, for two different questions:
+#: `has_effort_marker` decides whether AA's bare `slug` is safe to consult (it is
+#: not, when the name already names an effort level), and `effort_from_name` reads
+#: which level the name states so a `<slug>-<effort>` key can be built. `effort`
+#: itself is a marker word, not a level, and is deliberately not a member.
 EFFORT_TOKENS: frozenset[str] = frozenset(
     {
         "none",

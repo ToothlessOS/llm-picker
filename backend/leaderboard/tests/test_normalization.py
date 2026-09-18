@@ -12,7 +12,12 @@ import pytest
 
 from leaderboard.constants import MatchMethod
 from leaderboard.matching import match_aa_model
-from leaderboard.normalization import harness_fold, has_effort_marker, normalize_model_key
+from leaderboard.normalization import (
+    effort_from_name,
+    harness_fold,
+    has_effort_marker,
+    normalize_model_key,
+)
 from leaderboard.tests.factories import agent_index
 
 
@@ -102,23 +107,115 @@ class TestHasEffortMarker:
         outcome = match_aa_model(index, name="Qwen3.8 Max", slug="qwen3-8-max")
         assert outcome.method == MatchMethod.EXACT_NAME.value
 
-    def test_verbose_aa_phrasing_is_not_detected(self):
-        """DOCUMENTED LIMITATION, not desired behaviour.
+    def test_verbose_aa_phrasing_is_still_invisible_to_the_marker_check(self):
+        """The marker's silence on AA's prose dialect is deliberate and permanent.
 
         Artificial Analysis spells Claude and DeepSeek effort levels out in prose
         -- `"Claude Opus 5 (Adaptive Reasoning, High Effort)"` -- instead of the
         terse `"(high)"` its OpenAI-family rows use. The trailing-token check
         cannot see that, so the slug rung is *not* skipped for those records.
 
-        The consequence is visible in `docs/implementation.md`: it is why
-        `claude-opus-5-max` stays unmatched, and why a couple of AA records reach
-        the agent set through their slug rather than their name.
+        That is the correct behaviour for *this* function, whose only job is to
+        gate the bare-slug rung. It is not a limitation any more: the prose is
+        read by `effort_from_name`, which answers a different question and feeds
+        the stated-effort rung. See `TestEffortFromName` below for that reader and
+        `test_matching.TestAaStatedEffortSlugRung` for the rung it drives.
 
-        This test exists to pin the behaviour so that a future fix is a
-        deliberate act that updates the docs, rather than a silent change.
+        Widening this function to cover the verbose form would silently reopen the
+        bare-slug rung for exactly the records this design closes it on, so the
+        two must not be merged.
         """
         assert has_effort_marker(normalize_model_key("Claude Opus 5 (Adaptive Reasoning, High Effort)")) is False
         assert has_effort_marker(normalize_model_key("DeepSeek V4 Pro 0813 (Reasoning, Max Effort)")) is False
+
+        # The divergence, stated: same input, two different questions. The prose
+        # record is invisible to the gate yet perfectly legible to the reader.
+        assert effort_from_name("Claude Opus 5 (Adaptive Reasoning, High Effort)") == "high"
+
+
+class TestEffortFromName:
+    """What AA's `name` *states*, as opposed to what `has_effort_marker` sees.
+
+    These are two different questions and the tests are kept apart so neither
+    function can be "simplified" into the other.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            # The verbose prose dialect. The last one is load-bearing: the effort
+            # is not adjacent to the end of the name, because AA appends a
+            # fallback clause after it.
+            ("Claude Opus 5 (Adaptive Reasoning, Max Effort)", "max"),
+            ("Claude Opus 5 (Adaptive Reasoning, High Effort)", "high"),
+            ("Claude Opus 5 (Adaptive Reasoning, Xhigh Effort)", "xhigh"),
+            ("Claude Opus 5 (Adaptive Reasoning, Medium Effort)", "medium"),
+            ("Claude Fable 5.1 (Adaptive Reasoning, Low Effort, Default Fallback)", "low"),
+            ("DeepSeek V4.1 Flash (Reasoning, Max Effort)", "max"),
+            (
+                "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)",
+                "max",
+            ),
+        ],
+    )
+    def test_verbose_prose_levels_are_read(self, name, expected):
+        assert effort_from_name(name) == expected
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("GPT-5.5 (xhigh)", "xhigh"),
+            ("GLM-5.2 (max)", "max"),
+            ("Gemini 3.6 Flash (high)", "high"),
+            ("GPT-5.4 (low)", "low"),
+            # The two-token level, mirroring `has_effort_marker`.
+            ("Nova 2.0 Lite (Non-reasoning)", "non-reasoning"),
+        ],
+    )
+    def test_terse_parentheticals_are_read(self, name, expected):
+        assert effort_from_name(name) == expected
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "MiMo-V2.5-Pro",
+            "A.X-K2",
+            "Hy3",
+            # Says "Reasoning" but names no level -- so nothing is stated, and
+            # the rung must stay silent rather than assume.
+            "DeepSeek V3.2 (Reasoning)",
+            "Claude 4 Opus (Reasoning)",
+            "",
+            None,
+        ],
+    )
+    def test_names_stating_no_level_return_none(self, name):
+        assert effort_from_name(name) is None
+
+    def test_the_prose_form_requires_the_word_effort(self):
+        """Stated, not guessed: away from the end of the name, `Max` alone is not.
+
+        The word `Effort` is what makes AA's prose an explicit statement. Without
+        it the level would have to be inferred from a bare parenthetical, and
+        inferring a level is the thing this project refuses everywhere else.
+
+        Note the contrast with the terse dialect, which needs no such word: a
+        *trailing* `"(Max)"` is read, because a trailing parenthetical is itself
+        the statement. Only the mid-name, effort-less form is refused.
+        """
+        assert effort_from_name("Some Model (Adaptive Reasoning, Max, Default Fallback)") is None
+        # Trailing forms are still read, with or without the word.
+        assert effort_from_name("Some Model (Adaptive Reasoning, Max)") == "max"
+
+    def test_it_reports_what_the_name_states_not_what_the_model_is(self):
+        """The contract, pinned so it is not reused as an effort oracle.
+
+        `"Qwen3.8 Max"` is a product name whose last word collides with Anthropic's
+        `max` level. This reader reports `max` because that is what the name says.
+        The caller guards against acting on it -- see
+        `test_matching.TestAaStatedEffortSlugRung::test_a_product_name_containing_an_effort_word_does_not_construct_a_key`.
+        """
+        assert effort_from_name("Qwen3.8 Max") == "max"
 
 
 class TestHarnessFold:

@@ -11,6 +11,7 @@ export type MatchMethod =
   | 'exact_key'
   | 'exact_name'
   | 'exact_slug'
+  | 'exact_effort_slug'
   | 'harness_fold'
 export type SyncStatus =
   | 'failed'
