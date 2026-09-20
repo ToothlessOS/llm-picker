@@ -95,6 +95,14 @@ export function AppHeader({ metadata }: AppHeaderProps) {
                 className={({ isActive }) =>
                   `primary-nav__link${isActive ? ' primary-nav__link--active' : ''}`
                 }
+                to={{ pathname: '/interim-check-in', search }}
+              >
+                Interim check-in
+              </NavLink>
+              <NavLink
+                className={({ isActive }) =>
+                  `primary-nav__link${isActive ? ' primary-nav__link--active' : ''}`
+                }
                 to={{ pathname: '/models', search }}
               >
                 Models
