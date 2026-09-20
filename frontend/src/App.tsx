@@ -6,6 +6,7 @@ import { ArtificialAnalysisPage } from './features/artificial-analysis/Artificia
 import { CategoriesPage } from './features/categories/CategoriesPage'
 import { DataQualityPage } from './features/data-quality/DataQualityPage'
 import { HomePage } from './features/home/HomePage'
+import { InterimCheckInPage } from './features/interim/InterimCheckInPage'
 import { ModelDetailPage } from './features/models/ModelDetailPage'
 import { OverviewPage } from './features/overview/OverviewPage'
 import { PerformanceVsCostPage } from './features/visualizations/PerformanceVsCostPage'
@@ -39,6 +40,7 @@ function App() {
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<HomePage />} />
+        <Route path="interim-check-in" element={<InterimCheckInPage />} />
         <Route
           path="visualizations/performance-vs-cost"
           element={<PerformanceVsCostPage />}

@@ -16,6 +16,9 @@ describe('AppHeader', () => {
     expect(screen.getByRole('radio', { name: 'Day theme' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'Night theme' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'Auto theme' })).toBeTruthy()
+    expect(
+      screen.getByRole('link', { name: 'Interim check-in' }).getAttribute('href'),
+    ).toBe('/interim-check-in')
   })
 
   it('hides the theme toggle on data pages', () => {

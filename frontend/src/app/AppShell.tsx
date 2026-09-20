@@ -12,12 +12,14 @@ import { syncThemeFromSearch } from './theme'
 export function AppShell() {
   const location = useLocation()
   const isHome = location.pathname === '/'
+  const isInterimCheckIn = location.pathname === '/interim-check-in'
   const isModelDetail = location.pathname.startsWith('/models/')
   const isVisualization = location.pathname.startsWith('/visualizations')
   const isCategories = location.pathname.startsWith('/categories')
   const isArtificialAnalysis = location.pathname.startsWith('/artificial-analysis')
   const isDataQuality = location.pathname.startsWith('/data-quality')
-  const showFilters = !isHome && !isModelDetail && !isVisualization
+  const showFilters =
+    !isHome && !isInterimCheckIn && !isModelDetail && !isVisualization
 
   useEffect(() => {
     syncThemeFromSearch(location.search)
