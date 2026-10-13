@@ -338,6 +338,201 @@ class TestIdempotency:
         assert run.records_created == 0
 
 
+# --------------------------------------------------------------------------- #
+# Slug hand-offs between `aa_id`s
+# --------------------------------------------------------------------------- #
+
+# The real production case, taken from the live catalogue. AA moved the bare
+# slug off the row that had been serving it and gave it to a newly created one,
+# renaming the old row in the same release. `slug` is UNIQUE and the writer is
+# keyed on `aa_id`, so whichever of the two rows is written first used to raise
+# `IntegrityError: UNIQUE constraint failed: leaderboard_llmmodel.slug`.
+OLD_AA_ID = "901ec71b-51ec-4f53-b807-06ee17b890b4"
+NEW_AA_ID = "46f11cdf-1725-4abb-b39b-bd6bd948149c"
+BARE_SLUG = "jt-4-1-flash-236b-a21b"
+HANDOFF_NAME = "JT-4.1 Flash 236B A21B"
+RENAMED_SLUG = f"{BARE_SLUG}-non-reasoning"
+
+
+def _seed_bare_slug(*, slug: str = BARE_SLUG) -> None:
+    """Land the pre-release state: one row holding the slug AA is about to move."""
+    refresh.refresh_aa(
+        client=aa_client(aa_page([aa_model(OLD_AA_ID, slug, HANDOFF_NAME)])), use_lock=False
+    )
+
+
+def _handoff_page(*, new_owner_first: bool) -> object:
+    """The payload from the release that broke production, in either order."""
+    new_owner = aa_model(NEW_AA_ID, BARE_SLUG, f"{HANDOFF_NAME} (Reasoning)")
+    renamed = aa_model(OLD_AA_ID, RENAMED_SLUG, f"{HANDOFF_NAME} (Non-reasoning)")
+    records = [new_owner, renamed] if new_owner_first else [renamed, new_owner]
+    return aa_page(records)
+
+
+@pytest.mark.django_db
+class TestSlugHandoff:
+    @pytest.mark.parametrize("new_owner_first", [True, False])
+    def test_the_real_jt_4_1_flash_handoff_lands_in_either_order(self, new_owner_first):
+        """The regression. Both orders matter: which record is written first is
+        the only thing that decides whether the constraint fires, and payload
+        order is AA's to choose.
+        """
+        _seed_bare_slug()
+
+        run = refresh.refresh_aa(
+            client=aa_client(_handoff_page(new_owner_first=new_owner_first)), use_lock=False
+        )
+
+        assert run.status == SyncStatus.SUCCESS.value
+        assert LLMModel.objects.count() == 2
+        assert LLMModel.objects.get(aa_id=NEW_AA_ID).slug == BARE_SLUG
+        assert LLMModel.objects.get(aa_id=OLD_AA_ID).slug == RENAMED_SLUG
+        assert run.summary["slugs_reassigned"] == 1
+        # Both rows are still in the catalogue, so the released value is
+        # transient and there is nothing to report to a human.
+        assert run.summary["slugs_retired"] == 0
+
+    def test_the_released_value_is_never_committed_for_a_row_in_the_payload(self):
+        """It exists only between the release and the upsert, inside one
+        transaction. If it ever reached a committed row, the value would leak
+        into the API's slug space.
+        """
+        _seed_bare_slug()
+
+        refresh.refresh_aa(client=aa_client(_handoff_page(new_owner_first=True)), use_lock=False)
+
+        assert not LLMModel.objects.filter(slug__contains="-released-").exists()
+
+    def test_a_row_dropped_from_the_payload_keeps_a_released_slug_and_is_reported(self):
+        """The old owner is gone, so nothing rewrites it: its slug is committed
+        in released form and a bookmark for it now resolves to the new owner.
+        That is a real, reviewable event -- and the row is deactivated, never
+        deleted.
+        """
+        _seed_bare_slug()
+
+        refresh.refresh_aa(
+            client=aa_client(aa_page([aa_model(NEW_AA_ID, BARE_SLUG, f"{HANDOFF_NAME} (Reasoning)")])),
+            use_lock=False,
+        )
+
+        old = LLMModel.objects.get(aa_id=OLD_AA_ID)
+        assert old.is_active is False
+        assert old.slug != BARE_SLUG
+        assert old.slug.startswith(BARE_SLUG)
+        assert len(old.slug) <= LLMModel._meta.get_field("slug").max_length
+        # Exactly one row owns the slug -- the hand-off moved it, not copied it.
+        assert LLMModel.objects.filter(slug=BARE_SLUG).count() == 1
+        assert LLMModel.objects.get(slug=BARE_SLUG).aa_id == NEW_AA_ID
+
+        record = UnmatchedRecord.objects.get(
+            source=Source.ARTIFICIAL_ANALYSIS.value,
+            reason=UnmatchedReason.SLUG_REASSIGNED.value,
+            model_key=OLD_AA_ID,
+        )
+        assert record.detail == {
+            "old_slug": BARE_SLUG,
+            "released_slug": old.slug,
+            "aa_id": OLD_AA_ID,
+            "claimed_by_aa_id": NEW_AA_ID,
+        }
+
+    def test_a_full_length_slug_is_released_within_the_column_width(self):
+        """A 255-character slug is the worst case: `f"{slug}-released-{aa_id}"`
+        would be 300 characters and the replacement itself would be refused.
+        """
+        longest = "j" * 255
+        _seed_bare_slug(slug=longest)
+
+        run = refresh.refresh_aa(
+            client=aa_client(aa_page([aa_model(NEW_AA_ID, longest, f"{HANDOFF_NAME} (Reasoning)")])),
+            use_lock=False,
+        )
+
+        assert run.status == SyncStatus.SUCCESS.value
+        old = LLMModel.objects.get(aa_id=OLD_AA_ID)
+        assert len(old.slug) <= 255
+        assert LLMModel.objects.filter(slug=old.slug).count() == 1
+
+    def test_the_anomaly_is_recorded_once_then_closes_stale(self):
+        """Ledger semantics are current-state, not a history: the second run has
+        nothing to release, so the row it did not touch is retired as no-longer-
+        current rather than accumulating `occurrences` forever.
+        """
+        _seed_bare_slug()
+        page = [aa_model(NEW_AA_ID, BARE_SLUG, f"{HANDOFF_NAME} (Reasoning)")]
+
+        refresh.refresh_aa(client=aa_client(aa_page(page)), use_lock=False)
+        second = refresh.refresh_aa(client=aa_client(aa_page(page)), use_lock=False)
+
+        assert second.records_created == 0
+        assert second.records_unchanged == 1
+        assert second.summary["slugs_reassigned"] == 0
+        record = UnmatchedRecord.objects.get(
+            source=Source.ARTIFICIAL_ANALYSIS.value,
+            reason=UnmatchedReason.SLUG_REASSIGNED.value,
+            model_key=OLD_AA_ID,
+        )
+        assert record.occurrences == 1
+        assert record.is_current is False
+
+    @pytest.mark.parametrize("new_owner_first", [True, False])
+    def test_a_steady_state_refresh_releases_nothing(self, new_owner_first):
+        """The guard on `owner != holder.aa_id`. Releasing unconditionally would
+        rewrite every row on every run and destroy idempotency.
+        """
+        _seed_bare_slug()
+        refresh.refresh_aa(
+            client=aa_client(_handoff_page(new_owner_first=new_owner_first)), use_lock=False
+        )
+
+        run = refresh.refresh_aa(
+            client=aa_client(_handoff_page(new_owner_first=new_owner_first)), use_lock=False
+        )
+
+        assert run.summary["slugs_reassigned"] == 0
+        assert run.records_created == 0
+        assert run.records_unchanged == 2
+        assert not LLMModel.objects.filter(slug__contains="-released-").exists()
+
+    def test_a_dry_run_leaves_the_handoff_uncommitted(self):
+        """A rehearsal rolls back, so the release must roll back with it."""
+        _seed_bare_slug()
+
+        refresh.refresh_aa(
+            client=aa_client(_handoff_page(new_owner_first=True)), dry_run=True, use_lock=False
+        )
+
+        assert LLMModel.objects.count() == 1
+        assert LLMModel.objects.get(aa_id=OLD_AA_ID).slug == BARE_SLUG
+        assert not UnmatchedRecord.objects.filter(
+            reason=UnmatchedReason.SLUG_REASSIGNED.value
+        ).exists()
+
+    def test_a_later_failure_rolls_back_the_release(self, monkeypatch):
+        """The release is a write, so it belongs to the same transaction as the
+        upsert that follows it. If it were outside, a crash mid-write would
+        leave a row whose public slug had been taken away for nothing.
+        """
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        _seed_bare_slug()
+        monkeypatch.setattr(refresh.store, "upsert_aa_models", boom)
+
+        run = refresh.refresh_aa(
+            client=aa_client(_handoff_page(new_owner_first=True)), use_lock=False
+        )
+
+        assert run.status == SyncStatus.FAILED.value
+        assert LLMModel.objects.count() == 1
+        assert LLMModel.objects.get(aa_id=OLD_AA_ID).slug == BARE_SLUG
+        assert not UnmatchedRecord.objects.filter(
+            reason=UnmatchedReason.SLUG_REASSIGNED.value
+        ).exists()
+
+
 @pytest.mark.django_db
 class TestRollback:
     def test_a_mid_write_exception_leaves_zero_rows(self, monkeypatch):

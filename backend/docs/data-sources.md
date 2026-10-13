@@ -47,13 +47,16 @@ Rules built on that:
 
 ### Field mapping
 
-`slug` is unique across all 646 records, but **`id` (a UUID) is the upsert key**
-— a slug rename must update the existing row, not create a second one beside it.
+`slug` is unique **within any one snapshot** (verified: zero duplicates across the
+699 records of the 2026-10-13 read), but it is **not stable per model** — AA
+rotates a slug from one `id` to another across releases. See *Slug ownership*
+below. **`id` (a UUID) is the upsert key**: a slug rename must update the existing
+row, not create a second one beside it.
 
 | Source path | Column | Type rule |
 |---|---|---|
 | `id` | `LLMModel.aa_id` | unique; the identity |
-| `slug` | `LLMModel.slug` | unique |
+| `slug` | `LLMModel.slug` | unique per snapshot; reassignable across snapshots |
 | `name` | `LLMModel.name` | verbatim; **the preferred match key** |
 | `model_creator.id` / `.name` | `ModelCreator` FK (`PROTECT`) | upserted by UUID |
 | `release_date` | `release_date` | date |
@@ -84,6 +87,41 @@ matters at 100 requests/day.
 mean "not measured"; a zero would draw a real data point at the origin, reading
 as "free" or "instant". Enforced at the type-conversion layer
 (`validation.as_float` / `as_int`) and asserted end-to-end in the test suite.
+
+#### Slug ownership — unique per snapshot, but it moves between `id`s
+
+Uniqueness and stability are two different claims, and only the first is true.
+Both facts have to hold at once for the write to be safe, and they stop holding
+together exactly when AA reassigns a slug.
+
+Because the write is keyed on `id` while `slug` carries its own UNIQUE
+constraint, the row that used to own a slug and the row that is about to take it
+can be written in either order, and only one of those orders is safe. This is not
+hypothetical: it took the AA leg of the refresh down for every scheduled run from
+2026-10-13.
+
+| | `id` | `slug` | `name` |
+|---|---|---|---|
+| before | `901ec71b-…-b890b4` | `jt-4-1-flash-236b-a21b` | JT-4.1 Flash 236B A21B |
+| after | `901ec71b-…-b890b4` | `jt-4-1-flash-236b-a21b-non-reasoning` | JT-4.1 Flash 236B A21B (Non-reasoning) |
+| after | `46f11cdf-…-48149c` *(new)* | `jt-4-1-flash-236b-a21b` | JT-4.1 Flash 236B A21B (Reasoning) |
+
+AA split one model in two and handed the bare slug to the new reasoning variant —
+a release that changes two rows' slugs at once, in an order nothing controls.
+
+Rule: **`persistence.release_claimed_slugs` vacates every slug the payload claims
+for a different `id` before a single row is written**, inside the same
+transaction as the upsert. After that pass no other row holds a claimed slug, so
+every later write is free whatever the payload order. A row that is itself in the
+payload has its real slug written moments later, so the released value is never
+committed; a row that has dropped out of the catalogue keeps it, is deactivated,
+and is reported as a `slug_reassigned` anomaly. A slug that used to address one
+model now addressing another is worth a human look, but it is never a reason to
+fail the run.
+
+This is the AA-side counterpart of the `webdev` duplicate rule below: in both
+cases a natural key that looks like an identity is not one, and the writer has to
+reconcile it before the constraint can fire.
 
 ### Reasoning levels — the trap that shapes the matching
 

@@ -123,6 +123,12 @@ class UnmatchedReason(models.TextChoices):
     VALIDATION_FAILED = "validation_failed", "Validation failed"
     #: No usable identity field at all (missing/blank name).
     MISSING_IDENTITY = "missing_identity", "Missing identity"
+    #: AA handed this row's slug to a *different* `aa_id`, and the row itself has
+    #: dropped out of the catalogue. Distinct from `duplicate_model_name`: nothing
+    #: is duplicated and nothing was collapsed -- a public slug that used to
+    #: address this model now addresses another one, so a bookmark for it lands
+    #: somewhere else. Reported once, when the hand-off happens.
+    SLUG_REASSIGNED = "slug_reassigned", "Slug reassigned"
 
 
 class MatchMethod(models.TextChoices):

@@ -45,7 +45,11 @@ and asserting the endpoints still answer.
 
 - **`ModelCreator`** — AA creators, keyed by their UUID.
 - **`LLMModel`** — current AA state, keyed by `aa_id` (**not** `slug`, so a slug
-  rename updates the row rather than creating a twin).
+  rename updates the row rather than creating a twin). `slug` is unique, but AA
+  reassigns a slug from one `aa_id` to another, so `persistence.release_claimed_slugs`
+  vacates a claimed slug before the rows are written — see [data-sources.md](data-sources.md).
+  A hand-off whose old owner has left the catalogue is reported as a
+  `slug_reassigned` anomaly.
 - **`LMArenaEntry`** — current LMArena state, `UniqueConstraint(category,
   model_key)`, with `in_agent_set` / `agent_key` recording the intersection.
 - **`ModelMatch`** — the AA↔agent join. A table rather than a column on
@@ -246,7 +250,10 @@ Enforced at the persistence layer, as five rules:
    (`is_active=False`) so the previous state stays inspectable. The one
    exception is `ModelMatch`, which is *derived*: it is rebuilt inside the
    transaction that writes the run's data, so a failure rolls the rebuild back
-   along with everything else and the previous matches survive.
+   along with everything else and the previous matches survive. Releasing a
+   claimed slug (`release_claimed_slugs`) honours this too: it is an `UPDATE` of
+   one column, inside the same transaction as the upsert that follows it, so a
+   crash mid-write cannot leave a row that has lost its public slug for nothing.
 2. **All writes for one source in a single `transaction.atomic()`.** Network I/O
    never happens inside a transaction.
 3. **A failed run records `failed` + `error_code`** and leaves previous rows

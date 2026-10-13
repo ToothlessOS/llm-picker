@@ -18,6 +18,7 @@ The "don't destroy the last good data" rules are enforced at this layer:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -245,6 +246,111 @@ def upsert_aa_models(
     # Models that are retained but were not claimed by a match stay in the table
     # flagged `is_retained=False`; only the matched ones can be served.
     return by_aa_id
+
+
+#: Marks a slug vacated so that a different `aa_id` can take it over.
+_RELEASED_MARKER = "-released-"
+#: Digest widths to try, narrowest first. 64 hex chars is a full SHA-256, so the
+#: last step cannot collide with anything but itself.
+_RELEASED_DIGEST_LENGTHS: tuple[int, ...] = (16, 24, 32, 64)
+
+
+@dataclass(frozen=True)
+class ReleasedSlug:
+    """One row whose public slug was handed to a different `aa_id`."""
+
+    model: LLMModel
+    old_slug: str
+    new_owner_aa_id: str
+    #: True only when the row is absent from the payload -- then the released
+    #: slug is its committed state and the caller has to report it. When the row
+    #: is in the payload, `upsert_aa_models` overwrites this value in the same
+    #: transaction, so it is never committed and there is nothing to report.
+    keeps_released_slug: bool
+
+
+def _released_slug(slug: str, aa_id: str, *, taken: set[str]) -> str:
+    """Derive the value `slug` is vacated to, keeping it unique and in range.
+
+    A readable `f"{slug}-released-{aa_id}"` fails on both counts: the old slug
+    alone may be 255 characters, and `aa_id` adds 36 more. Keeping the old slug
+    as a prefix and appending a digest of `(aa_id, slug)` bounds the result to
+    the column width while staying deterministic, so re-running over the same
+    state derives the same value and nothing churns between refreshes.
+
+    `taken` is every slug that must survive the pass -- the payload's own claims
+    plus the rows that are not being vacated -- and grows as the caller releases
+    slots, which is what rules out a digest collision or a slug that merely
+    looks released.
+    """
+    limit = LLMModel._meta.get_field("slug").max_length
+    digest = hashlib.sha256(f"{aa_id}\x00{slug}".encode()).hexdigest()
+    for length in _RELEASED_DIGEST_LENGTHS:
+        tail = f"{_RELEASED_MARKER}{digest[:length]}"
+        candidate = f"{slug[: limit - len(tail)]}{tail}"
+        if candidate not in taken:
+            return candidate
+    raise RuntimeError(f"no free released slug for aa_id={aa_id!r}")  # pragma: no cover
+
+
+def release_claimed_slugs(parsed: Sequence[ParsedAAModel]) -> list[ReleasedSlug]:
+    """Vacate every slug the payload claims for a *different* `aa_id`.
+
+    AA rotates slugs between `aa_id`s across snapshots. The live catalogue has
+    zero duplicate slugs, so `slug` being UNIQUE is sound for any one snapshot
+    -- but the column is written verbatim while the upsert is keyed on `aa_id`,
+    so the *transition* is where two rows disagree about who owns a slug. The
+    observed hand-off: bare `jt-4-1-flash-236b-a21b` moved to a newly created
+    `aa_id`, with the previous holder renamed to `-non-reasoning`. Rows are
+    written one at a time in payload order, so whichever of the two is written
+    first raises `IntegrityError` -- on the INSERT branch if the new owner is
+    first, on the UPDATE branch if the old one is.
+
+    Freeing the slug up front removes the ordering dependence entirely: after
+    this pass no row other than the payload's own owner holds a claimed slug, so
+    every later INSERT and UPDATE is free whatever the payload order.
+
+    Must run inside the caller's transaction, immediately before
+    `upsert_aa_models`, which is what makes the released value invisible: for a
+    row that is in the payload it is overwritten moments later, and for one that
+    is not, the row is deactivated by `deactivate_missing_aa_models` and the
+    slug is unreachable through the API (`resolve_model` filters `is_active`).
+    """
+    claimed = {record.slug: record.aa_id for record in parsed}
+    if not claimed:
+        return []
+    incoming_aa_ids = {record.aa_id for record in parsed}
+
+    # Materialized because the rows are modified below, and the table is only a
+    # few hundred rows -- cheaper than reasoning about `__in` parameter limits.
+    existing = list(LLMModel.objects.only("aa_id", "slug", "name"))
+    taken: set[str] = set(claimed)
+    taken.update(row.slug for row in existing)
+
+    released: list[ReleasedSlug] = []
+    for holder in existing:
+        owner = claimed.get(holder.slug)
+        # Not claimed at all, or claimed by the row that already holds it (the
+        # steady-state case, which must stay a no-op for idempotency).
+        if owner is None or owner == holder.aa_id:
+            continue
+        old_slug = holder.slug
+        replacement = _released_slug(old_slug, holder.aa_id, taken=taken)
+        taken.add(replacement)
+        holder.slug = replacement
+        # `last_synced_at` is deliberately untouched: timestamps are passed in,
+        # never derived here, and this row is stamped moments later by the
+        # upsert or by `deactivate_missing_aa_models`.
+        holder.save(update_fields=["slug"])
+        released.append(
+            ReleasedSlug(
+                model=holder,
+                old_slug=old_slug,
+                new_owner_aa_id=owner,
+                keeps_released_slug=holder.aa_id not in incoming_aa_ids,
+            )
+        )
+    return released
 
 
 def deactivate_missing_aa_models(seen_aa_ids: Iterable[str], *, synced_at: datetime) -> int:
