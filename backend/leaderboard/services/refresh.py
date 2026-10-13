@@ -89,6 +89,7 @@ AA_LEDGER_REASONS: tuple[str, ...] = (
     UnmatchedReason.DUPLICATE_MODEL_NAME.value,
     UnmatchedReason.VALIDATION_FAILED.value,
     UnmatchedReason.MISSING_IDENTITY.value,
+    UnmatchedReason.SLUG_REASSIGNED.value,
 )
 
 AGENT_MISS_LEDGER_REASONS: tuple[str, ...] = (UnmatchedReason.NO_AA_MATCH.value,)
@@ -639,6 +640,9 @@ def _execute_aa(
 
     with transaction.atomic():
         creator_objects = store.upsert_creators(creators, synced_at=synced_at)
+        # Free every slug this payload hands to a different `aa_id` before a
+        # single row is written -- that is what makes the write order-independent.
+        released = store.release_claimed_slugs(parsed)
         models_by_aa_id = store.upsert_aa_models(
             parsed,
             creators=creator_objects,
@@ -691,6 +695,30 @@ def _execute_aa(
                     "dropped_slug": loser.slug,
                 },
             )
+        # Only the hand-offs that leave a trace behind are anomalies: a rotation
+        # between two rows that are both still in the catalogue is the ordinary
+        # way AA retires a slug, and the row keeps its final slug from the
+        # upsert. When the old owner has dropped out of the catalogue, its slug
+        # is committed in its released form, so a bookmark for it now resolves
+        # to a different model -- that is worth a human look. Keyed on the
+        # `aa_id` rather than the old slug: the slug is exactly the value that
+        # gets recycled, so keying on it would accumulate `occurrences` against
+        # whichever model picked it up next.
+        for item in released:
+            if not item.keeps_released_slug:
+                continue
+            ledger.record(
+                reason=UnmatchedReason.SLUG_REASSIGNED.value,
+                category=PRIMARY_CATEGORY,
+                model_key=item.model.aa_id,
+                model_name=item.model.name,
+                detail={
+                    "old_slug": item.old_slug,
+                    "released_slug": item.model.slug,
+                    "aa_id": item.model.aa_id,
+                    "claimed_by_aa_id": item.new_owner_aa_id,
+                },
+            )
         # Every agent model left without a claim is a row the completeness rule
         # will drop from `/overview/`, so it is recorded by name: this is the
         # list a human works through to decide between "AA simply lacks it" and
@@ -714,7 +742,8 @@ def _execute_aa(
             ledger.record(**anomaly)
 
         stats.deduplicated = len(losers)
-        stats.anomalies = len(anomalies) + len(unmatched) + len(losers)
+        slugs_retired = sum(1 for item in released if item.keeps_released_slug)
+        stats.anomalies = len(anomalies) + len(unmatched) + len(losers) + slugs_retired
         ledger.close_stale()
         agent_ledger.close_stale()
 
@@ -739,6 +768,8 @@ def _execute_aa(
             "unmatched": len(unmatched),
             "agent_models_unmatched": len(agent_misses),
             "duplicates": len(losers),
+            "slugs_reassigned": len(released),
+            "slugs_retired": slugs_retired,
             "matches_persisted": not in_memory_agent_set,
             "coverage_percent": (
                 len(winners) * 100 // len(index) if len(index) else None
