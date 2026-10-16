@@ -13,6 +13,9 @@ GET /api/v1/leaderboard/artificial-analysis/
 GET /api/v1/leaderboard/models/{key}/
 GET /api/v1/leaderboard/metadata/
 GET /api/v1/leaderboard/unmatched/
+GET /api/v1/leaderboard/discussions/
+GET /api/v1/leaderboard/discussions/{hn_id}/
+GET /api/v1/leaderboard/discussions/entities/
 ```
 
 Every endpoint is `GET` only (plus `HEAD`/`OPTIONS`); anything else is a `405`
@@ -802,6 +805,226 @@ it), because the ledger is rebuilt from each run rather than appended to.
 
 ---
 
+## 8. `GET /discussions/` — Hacker News threads
+
+LLM-related Hacker News discussions, ingested hourly. This is the project's third
+source and its only qualitative one: benchmark numbers say what a model scores,
+these say what people who use it think.
+
+**Defaults to the top 10** rather than the site-wide 50, because "the top 10 by
+up-votes / comments" is what the feature was specified as. The whole retained bank
+is one `?page_size=` away — and it is worth asking for, because over a bank of ten
+the entity filter would return almost nothing and read as broken.
+
+### Parameters
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `search` | string | — | Case-insensitive substring of the **title or any comment's text**. A thread matching in twelve comments is returned **once** (`count` counts threads, not comments). |
+| `entity` | csv | — | Entity slugs from `/discussions/entities/`. **Rolls up**: `?entity=anthropic` also returns threads tagged only `claude`, because a thread that only says "Claude" is still an Anthropic thread. Unknown slug → `400` listing `allowed`. |
+| `kind` | csv | — | `vendor` / `service`. Deliberately **not** rolled up, unlike `entity`: it asks what kind of thing the *tag* is, which is a question about the row. |
+| `min_points` / `max_points` | int ≥ 0 | — | |
+| `min_comments` / `max_comments` | int ≥ 0 | — | On the comment count Hacker News reports. |
+| `posted_after` / `posted_before` | date | — | Inclusive `YYYY-MM-DD`. `posted_before` means the *end* of that day. |
+| `ordering` | csv | `-rank_score` | `rank_score`, `points`, `num_comments`, `comments_stored`, `posted_at`, `fetched_at`, `title`, `domain`. |
+| `page`, `page_size` | int | 1, 10 | Max 200, clamped. |
+
+`rank_score` is `points + 1.0 × num_comments` — the draft's "up-votes / number of
+comments", with both components separately orderable so a reader who disagrees with
+the weighting can re-rank.
+
+### Response
+
+```json
+{
+  "count": 457,
+  "next": null,
+  "previous": null,
+  "page_size": 10,
+  "results": [
+    {
+      "hn_id": 49977979,
+      "title": "Mistral Large 4",
+      "url": "https://mistral.ai/news/large-4",
+      "domain": "mistral.ai",
+      "author": "someone",
+      "points": 2042,
+      "num_comments": 1216,
+      "comments_stored": 600,
+      "max_depth": 3,
+      "tree_truncated": true,
+      "rank_score": 3258.0,
+      "keywords": ["mistral"],
+      "posted_at": "2026-10-15T09:12:00Z",
+      "fetched_at": "2026-10-16T11:15:04Z",
+      "last_synced_at": "2026-10-16T11:15:04Z",
+      "hn_url": "https://news.ycombinator.com/item?id=49977979",
+      "entities": [
+        {"slug": "mistral", "label": "Mistral AI", "kind": "vendor", "vendor": null,
+         "matched_text": "Mistral", "match_mode": "token_prefix", "mentions": 12}
+      ],
+      "matched_comment_count": null
+    }
+  ],
+  "meta": { "...": "see below" }
+}
+```
+
+### Field notes
+
+| Field | Notes |
+|---|---|
+| `comments_stored` vs `num_comments` | Read them **together**. The gap is how much of the discussion was kept; `tree_truncated` says whether the ingest cap caused it. A thread with `comments_stored: 0` had its tree deferred to a later run — it is in the bank with its title tags and no comments yet. |
+| `keywords` | The relevance terms that put this thread in the bank, so "why is it here?" is answerable from the row. Served for display; **not filterable** — see below. |
+| `entities` | Merged across the thread's title and all its comments, so `mentions` is the total and each entity appears once. |
+| `matched_comment_count` | Present only when `search` was supplied, so its absence never has to be distinguished from "no matches". |
+
+`null` points means Hacker News has not published a count — never zero.
+
+### Why `keywords` is not a filter
+
+`relevance_terms` is a `JSONField`, and Django's `contains` lookup is unsupported
+on SQLite, so filtering on it would need a join table. That is more machinery than
+a filter nobody asked for earns, and the alternative — a substring match over
+serialized JSON — is exactly the kind of thing that works until it does not. The
+terms are served so a client can display or grey them out; the filters that were
+asked for are `search`, `entity` and `kind`.
+
+---
+
+## 9. `GET /discussions/{hn_id}/` — one thread
+
+The whole discussion in **one** response. There is no per-node endpoint: the ingest
+cap bounds the payload at a few hundred kilobytes, which is affordable for a view
+whose entire purpose is to draw the tree.
+
+### Parameters
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `max_depth` | int 0–64 | — | Server-side trim, so a client can paint a shallow first view. |
+| `search` | string | — | Restricts `comments` to those matching. |
+| `entity` | string | — | Restricts `comments` to those tagged with it. |
+
+### Response
+
+```json
+{
+  "thread": { "...": "a /discussions/ row, minus matched_comment_count, plus window_days" },
+  "comments": [
+    {
+      "hn_id": 49978001,
+      "parent_hn_id": null,
+      "depth": 0,
+      "sibling_index": 0,
+      "path": "000000",
+      "children_count": 4,
+      "author": "someone",
+      "points": null,
+      "text_html": "<p>Woah, this seems like a big deal</p>",
+      "text_plain": "Woah, this seems like a big deal",
+      "is_deleted": false,
+      "is_dead": false,
+      "posted_at": "2026-10-15T09:40:00Z",
+      "hn_url": "https://news.ycombinator.com/item?id=49978001",
+      "entities": [ "...": "as on a row" ]
+    }
+  ],
+  "meta": {
+    "generated_at": "...", "sources": { "...": "..." },
+    "discussions": { "...": "see below" },
+    "max_depth": null, "search": null, "entity": null, "comments_returned": 600
+  }
+}
+```
+
+### `comments` is a flat list, not nested JSON
+
+Ordered by `path`, which is a zero-padded chain of sibling indices — so a plain
+string sort reproduces **pre-order traversal**: a comment, then its replies, then
+the next sibling. Every node carries `depth` and `parent_hn_id`, which is
+everything needed to build a tree, or to render an indented list without one.
+
+Flat rather than nested is deliberate. Nesting makes two things ambiguous that
+matter: whether a childless node is childless or was cut by the ingest cap, and
+whether a missing parent means a deleted one. `children_count` counts **stored**
+children, so it reports zero where the cap cut them — which is what
+`thread.tree_truncated` is for.
+
+### `text_html` is pre-sanitized
+
+It is cleaned at ingest against a tag and attribute allowlist, and it is served as
+HTML on purpose: **do not re-escape it, and do not render it without care.** Use
+`text_plain` for anything that is not HTML — a tree label, a search result, an
+`aria-label`.
+
+---
+
+## 10. `GET /discussions/entities/` — the filter vocabulary
+
+Unpaginated, like `/categories/`: it exists so a dropdown can be built from real
+data in one call.
+
+```json
+{
+  "results": [
+    {"slug": "claude", "label": "Claude", "kind": "service", "vendor": "anthropic",
+     "lmarena_organization": null, "aliases": ["Claude"], "thread_count": 90},
+    {"slug": "anthropic", "label": "Anthropic", "kind": "vendor", "vendor": null,
+     "lmarena_organization": "anthropic", "aliases": ["Anthropic"], "thread_count": 74}
+  ],
+  "meta": {"generated_at": "...", "sources": {"...": "..."},
+           "discussions": {"...": "..."}, "kinds": ["vendor", "service"]}
+}
+```
+
+| Field | Notes |
+|---|---|
+| `kind` | Which of the two dropdowns this belongs to. There is deliberately no third for model variants. |
+| `vendor` | For a service, the vendor it rolls up to. This is what makes `?entity=anthropic` return Claude threads. |
+| `lmarena_organization` | The exact organization spelling LMArena publishes, when there is one — the bridge from a discussion back to the model tables via `/categories/agent/?organization=`. |
+| `aliases` | What actually tags this entity, so an empty filter can be told apart from a mis-spelled one. |
+| `thread_count` | Threads tagged **directly**. A vendor's total therefore excludes threads that name only its services, because a click produces the roll-up — reporting the rolled-up total here would make the number disagree with the rows behind it. |
+
+Do **not** reuse `AppShell`'s provider query for this. That returns LMArena
+organization *strings*, which is a different vocabulary: an entity is a reviewed
+row with aliases and a vendor.
+
+---
+
+## `meta.discussions` — and why it is not in `meta.sources`
+
+Every discussion response carries a `discussions` block, and `/metadata/` carries
+it as a top-level key:
+
+```json
+"discussions": {
+  "configured": true, "last_attempt_at": "...", "last_status": "success",
+  "last_success_at": "...", "age_seconds": 90, "is_stale": false,
+  "stale_after_seconds": 7200, "last_error": null,
+  "counts": {"threads": 457, "comments": 2400, "tags": 1258, "entities": 52},
+  "window_days": 14, "default_page_size": 10, "top_n": 10, "enabled": true
+}
+```
+
+**`meta.sources` is unchanged — it still holds exactly `lmarena` and
+`artificial_analysis`.** That block describes the *model* rows a response is
+carrying, and it is typed on the frontend as exactly two sources. Adding a third
+key would put discussion freshness on `/overview/`, where it means nothing, and
+widen a documented contract for no gain.
+
+The freshness trichotomy is the same one every other source reports, because it is
+built by the same helper: never refreshed (`last_success_at: null`, `is_stale:
+true`), refresh failing (`last_status` not a success, with `last_error`), and simply
+old (`is_stale: true` with a non-null `last_success_at`). The threshold differs —
+`stale_after_seconds` is **7200** where the model sources use 50400 — because the
+job runs hourly rather than twice daily, so two hours tolerates one missed run.
+
+**Retention is 14 days and threads are deleted when they age out.** A thread id
+that 404s is usually an expired link rather than a bug; the 404 body says so.
+
+---
+
 ## Errors
 
 Every error body has an `error` string, so branch on that rather than parsing
@@ -812,7 +1035,7 @@ prose.
 | 400 | `invalid_parameter` | A query parameter was malformed or not whitelisted. Carries `param` and, where a whitelist exists, `allowed`. |
 | 404 | `unknown_value` | A path segment named something outside a closed set (e.g. a bad category). Carries `param` and `allowed`. |
 | 404 | `model_incomplete` | The model exists but is excluded by the completeness rule. **Expected, not an error.** |
-| 404 | `not_found` | No such key / page out of range. |
+| 404 | `not_found` | No such key / page out of range. For `/discussions/{hn_id}/` the body also names the id and says the thread was retained for N days and then pruned — an expired link, not a bug. |
 | 405 | `method_not_allowed` | Non-`GET`. |
 | 429 | `throttled` | The per-IP rate limit was exceeded. Carries a `Retry-After` header. |
 | 500 | `server_error` | |

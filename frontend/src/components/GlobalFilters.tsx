@@ -1,8 +1,9 @@
-import { Search, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { X } from 'lucide-react'
+import { useMemo } from 'react'
 
 import { CATEGORIES, type Category } from '../api'
 import { useGlobalFilters } from '../app/useGlobalFilters'
+import { SearchField } from './SearchField'
 
 const categoryLabels: Record<Category, string> = {
   agent: 'Agent',
@@ -17,36 +18,6 @@ interface GlobalFiltersProps {
   showCategory?: boolean
   showProvider?: boolean
   categoryRequiresSelection?: boolean
-}
-
-interface SearchFilterProps {
-  initialValue: string
-  onSearchChange: (value: string) => void
-}
-
-function SearchFilter({ initialValue, onSearchChange }: SearchFilterProps) {
-  const [value, setValue] = useState(initialValue)
-
-  useEffect(() => {
-    if (value === initialValue) return
-    const timeout = window.setTimeout(() => onSearchChange(value.trim()), 300)
-    return () => window.clearTimeout(timeout)
-  }, [initialValue, onSearchChange, value])
-
-  return (
-    <label className="filter-control filter-control--search">
-      <span className="filter-control__label">Find a model</span>
-      <span className="filter-control__input-wrap">
-        <Search aria-hidden="true" size={17} />
-        <input
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="Name or provider"
-          type="search"
-          value={value}
-        />
-      </span>
-    </label>
-  )
 }
 
 export function GlobalFilters({
@@ -78,10 +49,11 @@ export function GlobalFilters({
   return (
     <div className="filter-band" aria-label="Global filters">
       <div className="filter-band__inner">
-        <SearchFilter
-          initialValue={filters.search}
-          key={filters.search}
+        <SearchField
+          label="Find a model"
           onSearchChange={(search) => updateFilters({ search })}
+          placeholder="Name or provider"
+          value={filters.search}
         />
 
         {showProvider ? (

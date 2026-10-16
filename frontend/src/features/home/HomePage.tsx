@@ -1,6 +1,7 @@
 import { ArrowUpRight } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 
+import { DiscussionMapPreview } from '../discussions/DiscussionMapPreview'
 import { CostPerTaskPreview } from '../visualizations/CostPerTaskPreview'
 import { ModelCardPreview } from '../visualizations/ModelCardPreview'
 import { PerformanceVsCostPreview } from '../visualizations/PerformanceVsCostPreview'
@@ -10,6 +11,7 @@ const dataLinks = [
   { to: '/models', title: 'Models', blurb: 'Complete matched table' },
   { to: '/categories', title: 'Categories', blurb: 'Task leaderboards' },
   { to: '/artificial-analysis', title: 'AA Models', blurb: 'Full AA catalog' },
+  { to: '/discussions', title: 'Discussions', blurb: 'LLM threads from Hacker News' },
   { to: '/data-quality', title: 'Data quality', blurb: 'Matching and freshness' },
 ] as const
 
@@ -125,7 +127,31 @@ export function HomePage() {
         </div>
       </section>
 
-      <p className="survey-note">People like you — coming soon</p>
+      <section className="home-section" id="people-like-you">
+        <p className="home-kicker">People like you</p>
+        <div className="viz-gallery">
+          <Link
+            aria-labelledby="viz-discussion-map-title"
+            className="viz-stage viz-stage--link"
+            to={{ pathname: '/discussions/map', search: location.search }}
+          >
+            <header>
+              <div>
+                <h2 id="viz-discussion-map-title">Discussion map</h2>
+                <p>
+                  What Hacker News says about these models, and where in the
+                  thread they said it.
+                </p>
+              </div>
+              <span className="viz-stage__action">
+                Open interactive
+                <ArrowUpRight aria-hidden="true" size={16} />
+              </span>
+            </header>
+            <DiscussionMapPreview />
+          </Link>
+        </div>
+      </section>
     </main>
   )
 }

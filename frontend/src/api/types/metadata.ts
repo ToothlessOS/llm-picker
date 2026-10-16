@@ -9,6 +9,7 @@ import type {
   SourceFreshnessMap,
   SyncStatus,
 } from './common'
+import type { DiscussionFreshness } from './discussions'
 
 export interface CategorySummary {
   category: Category
@@ -64,6 +65,15 @@ export interface MetadataCounts {
 export interface MetadataResponse {
   sources: SourceFreshnessMap
   counts: MetadataCounts
+  /**
+   * Hacker News freshness, as its own key.
+   *
+   * Deliberately **not** part of `sources`, which describes the freshness of the
+   * model rows a response carries and is typed as exactly two sources. The body
+   * is the same shape, built by the same selector, so the badge behaves
+   * identically wherever it renders.
+   */
+  discussions: DiscussionFreshness
   categories: CategorySummary[]
   matching: Record<string, number> & Partial<Record<MatchMethod, number>>
   recent_runs: SyncRun[]

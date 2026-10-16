@@ -13,7 +13,11 @@ from typing import Any, Mapping
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from ..constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from ..constants import (
+    DEFAULT_DISCUSSION_PAGE_SIZE,
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+)
 from .errors import InvalidParameter
 
 
@@ -61,3 +65,16 @@ class LeaderboardPagination(PageNumberPagination):
                 "meta": dict(self.extra_meta),
             }
         )
+
+
+class DiscussionPagination(LeaderboardPagination):
+    """The same paging, with the draft's "top 10" as the default page size.
+
+    A subclass rather than a per-view assignment, so the number lives in one place
+    and `?page_size=` still works unchanged. The smaller default is the feature's
+    own spec; the whole bank stays one parameter away, which is what makes the
+    provider and service filters worth offering at all -- over a bank of ten they
+    would return almost nothing and read as broken.
+    """
+
+    page_size = DEFAULT_DISCUSSION_PAGE_SIZE

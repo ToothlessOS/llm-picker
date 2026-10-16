@@ -2212,3 +2212,779 @@ button.pareto-front-link {
     border-bottom: 0;
   }
 }
+
+
+/* ---------------------------------------------------------------------------
+   Discussions
+   ---------------------------------------------------------------------------
+   A reader's view of a Hacker News thread: the list, and the thread itself as an
+   indented comment list. Every colour comes from the existing tokens, so these
+   track the day/night theme without a second definition.
+   --------------------------------------------------------------------------- */
+
+/* The page-level search and ordering controls, outside the global filter band --
+   which is hidden here because its parameters are LMArena-specific. */
+.filter-band--inline {
+  margin-bottom: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.muted {
+  color: var(--color-text-muted);
+}
+
+.numeric-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table-link {
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.table-link:hover {
+  color: var(--color-primary-strong);
+  text-decoration: underline;
+}
+
+.table-subtitle {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.breadcrumb {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.breadcrumb a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.breadcrumb a:hover {
+  color: var(--color-primary-strong);
+}
+
+/* Entity chips. `--vendor` and `--service` are distinguished by weight rather
+   than by hue alone, so the two remain tellable apart without colour. */
+.entity-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.entity-chip {
+  padding: 2px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.entity-chip--vendor {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.page-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.discussion-summary {
+  margin-bottom: 20px;
+}
+
+.discussion-summary__links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.discussion-summary__links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-primary-strong);
+}
+
+.callout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-size: 13px;
+}
+
+.callout--warning {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-text);
+}
+
+/* The comment list.
+   Indentation is a depth-derived CSS variable capped in the component, because a
+   thread nested thirty deep would otherwise indent its text off the screen. */
+.discussion-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.discussion-comment {
+  padding-block: 8px;
+  padding-inline-start: calc(var(--depth, 0) * 18px);
+  border-inline-start: 2px solid var(--color-border);
+  padding-inline-end: 10px;
+}
+
+.discussion-comment--deleted {
+  opacity: 0.7;
+}
+
+.discussion-comment__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.discussion-comment__author {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.discussion-comment__body {
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.discussion-comment__body p {
+  margin: 0 0 8px;
+}
+
+.discussion-comment__body p:last-child {
+  margin-bottom: 0;
+}
+
+/* Comments carry preformatted code, so this must not wrap into nonsense. */
+.discussion-comment__body pre {
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+
+.discussion-comment__body code {
+  font-size: 0.92em;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Discussion map
+   ---------------------------------------------------------------------------
+   The ConVis layout: threads | map | reader, with the search and filter band
+   above. The three panes share one fixed height and scroll independently, which
+   is what keeps the map and the reader beside each other while either moves.
+
+   Blocks carry no text by design -- the map is an overview, the reader is where
+   reading happens -- so every mark here is an axis-aligned rectangle and can be
+   plain DOM rather than SVG. Colours come from the --map-hue-* tokens, assigned
+   per thread by app/palette.ts.
+   --------------------------------------------------------------------------- */
+
+.map-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 380px;
+  gap: 18px;
+  height: min(74vh, 720px);
+  margin-top: 4px;
+}
+
+/* --- the toolbar row under the controls --- */
+
+.map-toolbar .filter-band__inner {
+  grid-template-columns: minmax(200px, 1fr) repeat(3, minmax(128px, 170px)) auto;
+}
+
+.map-toolbar__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px 12px;
+}
+
+.map-toolbar__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.map-toolbar__counts {
+  margin: 0 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-toolbar__note {
+  margin: 0;
+  padding: 0 18px 12px;
+  color: var(--color-warning-text);
+  font-size: 12px;
+}
+
+.map-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-primary);
+  border-radius: 999px;
+  background: var(--color-primary-soft);
+  color: var(--color-text);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.map-chip:hover {
+  background: var(--color-primary);
+  color: var(--color-surface);
+}
+
+/* --- the panes --- */
+
+.rail,
+.reader,
+.map-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.map-pane-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Fills the wrap, so the scroll area inside it is given a height to scroll
+   within rather than growing to its content and pushing the legend off the
+   bottom of the pane. */
+.map-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+/* --- the thread rail --- */
+
+.rail__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-block-end: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rail__list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.rail__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-block-end: 1px solid var(--color-border);
+  background: none;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.rail__row:hover {
+  background: var(--color-primary-soft);
+}
+
+.rail__row.is-selected {
+  box-shadow: inset 3px 0 0 var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
+.rail__title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.rail__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail__entities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rail__entity {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+}
+
+.rail__pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-block-start: 1px solid var(--color-border);
+  font-size: 11.5px;
+}
+
+.rail__pager button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.rail__pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --- the map --- */
+
+.map-pane {
+  gap: 0;
+}
+
+.map-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Breathing room for what is drawn *outside* a block's box: the focus outline
+     (2px plus a 1px offset) and the search glow (9px of blur). A scroll
+     container clips at its padding box, so without this the first row's outline
+     was sheared off at the top and the last row's at the bottom — the block
+     looked bordered on three sides. */
+  padding-block: 12px;
+  /* The map follows the reader's position; `scrollTop` assignments animate.
+     `prefers-reduced-motion` already neutralises this globally. */
+  scroll-behavior: smooth;
+}
+
+.map-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.map-row {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.map-row--plain {
+  background: var(--color-map-neutral);
+}
+
+/* Nothing here matched the filter. Dimmed rather than hidden, so the shape of
+   the thread — which is the thing the map is for — stays readable. */
+.map-row.is-dimmed {
+  opacity: 0.4;
+}
+
+.map-row--plain.is-dimmed {
+  opacity: 0.25;
+}
+
+/* The search hit, as a ring *outside* the block: a glow competes with nothing,
+   where a fill would have to share the channel that means "entity". */
+.map-row.is-hit {
+  box-shadow:
+    0 0 0 2px var(--color-search-glow),
+    0 0 9px 2px color-mix(in srgb, var(--color-search-glow) 50%, transparent);
+}
+
+/* Selection is an outline so it never fights the glow's box-shadow, and never
+   reflows the block. */
+.map-row.is-focus {
+  outline: 2px solid var(--color-primary-strong);
+  outline-offset: 1px;
+}
+
+.map-row.is-reading {
+  outline: 3px solid var(--color-text);
+  outline-offset: 1px;
+  z-index: 1;
+}
+
+.map-row--compact {
+  justify-content: flex-start;
+  padding-inline-start: 6px;
+  border: 1px dashed var(--color-border-strong);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.map-row__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The provider, written on the block. Inset so the fill still reads around it,
+   and small enough to fit the shortest block the height scale produces (14px). */
+.map-row--block {
+  padding-inline-start: 4px;
+}
+
+.map-row__name {
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 3px;
+  /* Mostly the surface colour rather than an opaque one, so the block's hue tints
+     through and the name stays tied to the band beside it — while the text keeps
+     a guaranteed contrast against whatever is underneath. */
+  background: color-mix(in srgb, var(--color-surface) 82%, transparent);
+  color: var(--color-text);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 11px;
+  border-block-start: 1px solid var(--color-border);
+  font-size: 11px;
+}
+
+.map-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-legend__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.map-legend__swatch--plain {
+  background: var(--color-map-neutral);
+}
+
+.map-legend__swatch--hit {
+  background: var(--color-surface);
+  box-shadow: 0 0 0 2px var(--color-search-glow);
+}
+
+/* --- the reader --- */
+
+.reader__scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The pinned branch, as its own region above the scrolling replies.
+   Deliberately NOT `position: sticky`: a sticky element floats over the scroll
+   layer it sits in, so the replies slid underneath it and were painted behind
+   the pinned comment. Two siblings cannot overlap, so this holds its space and
+   the replies scroll in what is left. The height cap keeps a very long selected
+   comment from crowding the replies out; only then does it scroll internally. */
+.reader__pinned {
+  display: flex;
+  flex-direction: column;
+  /* Grows to its content, capped, and never pushes the replies out entirely:
+     the scrolling region below grows from a zero basis and takes what is left. */
+  flex: 0 1 auto;
+  max-height: 45%;
+  border-block-end: 1px solid var(--color-border-strong);
+  background: var(--color-surface-muted);
+}
+
+.reader__focus-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 14px 6px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.reader__pinned-body {
+  min-height: 0;
+  padding: 0 14px 12px;
+  overflow-y: auto;
+}
+
+.reader__focus-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 11px;
+  /* Opts out of the kicker's uppercase tracking: it is a control, and it says
+     which way it goes. */
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+/* The reader's "Details" block: the thread's provenance, deliberately much
+   thinner than the shared `.discussion-summary` — see `ReaderDetails`. The
+   stat grid and the thread's tag cloud are not repeated here because the rail,
+   the toolbar and the map legend already carry them.
+   It is a fixed region at the very top of the reader, not the first item of the
+   scrolling one, so it neither scrolls away nor gets pushed down by a pinned
+   branch. */
+.reader__details {
+  flex: 0 0 auto;
+  padding: 12px 14px;
+  border-block-end: 1px solid var(--color-border);
+}
+
+.reader__details-heading {
+  margin: 0 0 6px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.reader__links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.reader__links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-primary-strong);
+}
+
+.reader__status {
+  margin: 0 0 8px;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reader__toggle,
+.reader__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 2px 0 6px calc(var(--depth, 0) * 18px);
+  padding: 3px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.reader__more {
+  margin-inline-start: 0;
+}
+
+.reader__toggle:hover,
+.reader__more:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+
+/* The reading position, still a border *and* a weight change, so the two states
+   never differ by hue alone. */
+.discussion-comment.is-active {
+  border-inline-start-width: 3px;
+  border-inline-start-color: var(--color-text);
+  background: color-mix(in srgb, var(--color-primary-soft) 60%, transparent);
+}
+
+.discussion-comment.is-focus {
+  border-inline-start-width: 3px;
+  border-inline-start-color: var(--color-primary-strong);
+}
+
+.discussion-comment--dead {
+  opacity: 0.65;
+}
+
+/* A search mark: background, weight and an underline, because a yellow
+   background alone disappears for a reader who cannot see it. */
+.comment-hl {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-text);
+  font-weight: 600;
+  box-shadow: inset 0 -1px 0 var(--color-warning-border);
+}
+
+/* --- the home card's thumbnail --- */
+
+.map-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  padding: 14px 16px;
+}
+
+.map-preview__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-preview__row {
+  display: block;
+  border-radius: 2px;
+}
+
+.map-preview__row--plain {
+  background: var(--color-map-neutral);
+}
+
+.map-preview__row.is-hit {
+  box-shadow: 0 0 0 2px var(--color-search-glow);
+}
+
+.map-preview__more {
+  color: var(--color-text-muted);
+  font-size: 10px;
+}
+
+@media (max-width: 1080px) {
+  .map-layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .map-pane-wrap {
+    height: 60vh;
+  }
+
+  .reader {
+    height: 60vh;
+  }
+
+  .rail {
+    max-height: 260px;
+  }
+}

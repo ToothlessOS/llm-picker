@@ -20,6 +20,7 @@ import logging
 from celery import shared_task
 
 from .models import SyncRun
+from .services import discussions as discussions_service
 from .services import refresh as refresh_service
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,28 @@ def refresh_aa(self, dry_run: bool = False) -> dict:
     """
     run = refresh_service.refresh_aa(
         triggered_by="celery:manual",
+        dry_run=dry_run,
+        celery_task_id=self.request.id or "",
+    )
+    return _summary(run)
+
+
+@shared_task(bind=True, name="leaderboard.refresh_discussions")
+def refresh_discussions(self, dry_run: bool = False) -> dict:
+    """The hourly Hacker News refresh. **The only scheduled discussion task.**
+
+    The `LEADERBOARD_HN_ENABLED` check is repeated here, having already gated the
+    entry in `CELERY_BEAT_SCHEDULE`, and the repetition is the point:
+    `django-celery-beat`'s `DatabaseScheduler` treats its `PeriodicTask` rows as
+    authoritative, so turning the setting off does not remove a row that already
+    exists and beat would keep firing this task. The setting has to be able to
+    stop a run, not merely prevent one from being scheduled.
+    """
+    if not discussions_service.hn_enabled():
+        return _summary(discussions_service.skip_disabled(triggered_by="celery:beat"))
+
+    run = discussions_service.refresh_discussions(
+        triggered_by="celery:beat",
         dry_run=dry_run,
         celery_task_id=self.request.id or "",
     )

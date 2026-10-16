@@ -916,3 +916,58 @@ class TestUnmatched:
 
         after = get(client, "/unmatched/", source=Source.ARTIFICIAL_ANALYSIS.value).json()["count"]
         assert after == before
+
+
+# --------------------------------------------------------------------------- #
+# The discussion seed
+# --------------------------------------------------------------------------- #
+
+
+def seed_discussions() -> dict:
+    """A small LLM-related thread bank, written by the real ingest service.
+
+    A **separate** function rather than part of `seed()`, deliberately: `seed()`
+    is what most of `test_api.py` calls, and folding a thread bank into it would
+    add a pipeline run to seventy-odd tests that never look at a discussion.
+
+    Written through `refresh_discussions` with a fake client rather than by
+    constructing rows, so the `path` values, the sanitized HTML and the tags are
+    all produced by the code under test -- a hand-built fixture would agree with
+    the API by construction and prove nothing about the ingestion.
+
+    Uses the vocabulary that ships with migration 0009 rather than installing its
+    own, and that is load-bearing for idempotency: replacing the entities would
+    delete them, and `DiscussionTag.entity` cascades -- so a second call would
+    silently drop the *comment* tags the first call wrote, which the next run does
+    not rebuild because nothing was refetched. The seeded vocabulary already has
+    `claude` under `anthropic`, which is exactly the shape these tests want.
+    """
+    from datetime import datetime, timezone
+
+    from leaderboard.services import discussions
+    from leaderboard.tests.fakes import FakeHNClient, hn_comment, hn_item, hn_story_hit
+
+    now = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+
+    def hit(hn_id: int, title: str, **overrides):
+        # Anchored to `now`, because the retention window is measured against it:
+        # a story dated a year earlier would be pruned in the same transaction
+        # that stored it, and every caller would see an empty bank.
+        overrides.setdefault("created_at_i", int(now.timestamp()) - 3600)
+        # Above the bank's floor: a thread below it is pruned in the same
+        # transaction that stored it.
+        overrides.setdefault("num_comments", 10)
+        return hn_story_hit(hn_id, title, **overrides)
+
+    client = FakeHNClient(
+        window_hits=[hit(1001, "Claude 5 is out", points=900, num_comments=10)],
+        items={
+            1001: hn_item(
+                1001,
+                title="Claude 5 is out",
+                children=[hn_comment(2001, author="alice", text="<p>I use Claude</p>")],
+            )
+        },
+    )
+    discussions.refresh_discussions(client=client, use_lock=False, synced_at=now, now=now)
+    return {"hn_id": 1001, "comment_hn_id": 2001}

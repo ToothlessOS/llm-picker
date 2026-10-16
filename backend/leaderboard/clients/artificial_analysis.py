@@ -22,7 +22,6 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping
 
 from ..constants import AA_MAX_INLINE_RETRY_AFTER_SECONDS, AA_MAX_PAGES
@@ -36,7 +35,15 @@ from .exceptions import (
     TransportError,
     UpstreamServerError,
 )
-from .http import DEFAULT_TIMEOUT_SECONDS, RequestsTransport, Response, RetryPolicy, Transport
+from .http import (
+    DEFAULT_TIMEOUT_SECONDS,
+    RequestsTransport,
+    Response,
+    RetryPolicy,
+    Transport,
+    header_lookup,
+    retry_after_seconds,
+)
 
 DEFAULT_BASE_URL = "https://artificialanalysis.ai/api/v2"
 MODELS_FREE_PATH = "/language/models/free"
@@ -63,14 +70,6 @@ class AAFetchResult:
     tier: str
     intelligence_index_version: float | None
     rate_limit: RateLimitSnapshot
-
-
-def _header_lookup(headers: Mapping[str, str] | None) -> dict[str, str]:
-    """Case-insensitive header access that works for `requests` *and* for the
-    plain dicts a test fake returns."""
-    if not headers:
-        return {}
-    return {str(key).lower(): value for key, value in headers.items()}
 
 
 def _as_int(value: Any) -> int | None:
@@ -286,7 +285,7 @@ class ArtificialAnalysisClient:
         return payload
 
     def _snapshot(self, response: Response) -> RateLimitSnapshot:
-        headers = _header_lookup(getattr(response, "headers", None))
+        headers = header_lookup(getattr(response, "headers", None))
         reset_raw = _as_int(headers.get("x-ratelimit-reset"))
         reset_at = (
             datetime.fromtimestamp(reset_raw, tz=timezone.utc) if reset_raw is not None else None
@@ -300,21 +299,9 @@ class ArtificialAnalysisClient:
 
     @staticmethod
     def _retry_after(response: Response) -> int | None:
-        """`Retry-After` is either delta-seconds or an HTTP-date."""
-        raw = _header_lookup(getattr(response, "headers", None)).get("retry-after")
-        if raw is None or raw == "":
-            return None
-        try:
-            return int(float(raw))
-        except (TypeError, ValueError):
-            pass
-        try:
-            when = parsedate_to_datetime(str(raw))
-        except (TypeError, ValueError):
-            return None
-        if when is None:
-            return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        delta = (when - datetime.now(tz=timezone.utc)).total_seconds()
-        return max(0, int(delta))
+        """`Retry-After` is either delta-seconds or an HTTP-date.
+
+        Delegates to the shared parser in `http.py`, so the two providers cannot
+        drift on how they read the same header.
+        """
+        return retry_after_seconds(response)

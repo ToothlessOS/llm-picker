@@ -9,6 +9,14 @@ vi.mock('../../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api')>()
   return {
     ...actual,
+    // The discussion-map card reads the counts `AppShell` already polls — same
+    // cache key, so it costs no extra request. Mocked because a real one would
+    // be a network call from jsdom.
+    getMetadata: vi.fn().mockResolvedValue({
+      discussions: {
+        counts: { threads: 113, comments: 21_103, tags: 4_543, entities: 52 },
+      },
+    }),
     getOverview: vi.fn().mockResolvedValue({
       count: 0,
       next: null,
@@ -38,7 +46,7 @@ function renderHome() {
 }
 
 describe('HomePage', () => {
-  it('renders the cover, four chart stages, and data links', () => {
+  it('renders the cover, the chart stages, the discussion map, and data links', () => {
     renderHome()
 
     expect(
@@ -73,6 +81,13 @@ describe('HomePage', () => {
     expect(screen.getByRole('link', { name: /Matching and freshness/ }).getAttribute('href')).toBe(
       '/data-quality',
     )
+
+    expect(screen.getByRole('link', { name: /Discussion map/ }).getAttribute('href')).toBe(
+      '/discussions/map',
+    )
+    // The placeholder this feature replaced. Named as a test so that putting it
+    // back — or shipping the card without a working link — fails loudly.
+    expect(screen.queryByText(/coming soon/i)).toBeNull()
 
     const dataHeading = screen.getByRole('heading', { name: 'Models' })
     const cover = screen.getByRole('heading', { name: /Which model is worth/ })

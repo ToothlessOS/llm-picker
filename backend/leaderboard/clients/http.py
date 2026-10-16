@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 import requests
@@ -96,3 +98,38 @@ class RetryPolicy:
         # Full jitter: spreads a fleet of workers out after a shared outage
         # instead of having them all retry on the same tick.
         return float(uniform(0, ceiling))
+
+
+def header_lookup(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Case-insensitive header access that works for `requests` *and* for the
+    plain dicts a test fake returns."""
+    if not headers:
+        return {}
+    return {str(key).lower(): value for key, value in headers.items()}
+
+
+def retry_after_seconds(response: Response, *, now: Any = None) -> int | None:
+    """The `Retry-After` header as whole seconds, or ``None`` when absent.
+
+    The header is either delta-seconds or an HTTP-date, and both spellings are in
+    the wild, so both are parsed here rather than at each call site. Lives in this
+    module because it is a property of the protocol, not of either provider.
+    """
+    raw = header_lookup(getattr(response, "headers", None)).get("retry-after")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        when = parsedate_to_datetime(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    reference = now if now is not None else datetime.now(tz=timezone.utc)
+    delta = (when - reference).total_seconds()
+    return max(0, int(delta))

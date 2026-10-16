@@ -318,6 +318,7 @@ our reading of AA's prose was failing.
 |---|---|
 | Artificial Analysis | API v2, free tier. **A visible credit is required wherever their data is displayed.** |
 | LMArena | `lmarena-ai/leaderboard-dataset` on Hugging Face, fetched via `datasets`. |
+| Hacker News | Algolia's public search API. No licence or credit obligation, but every served thread and comment carries its `hn_url`, so a reader can always reach the original discussion. |
 
 The required attribution URLs are served by the API in `/metadata/`'s top-level
 `attribution` block, so the frontend reads them rather than hard-coding them.
@@ -334,3 +335,175 @@ metrics appear.
 | Historical snapshots / time series | Latest-only. The `full` splits are unused; there is no backfill. |
 | Pairwise battle counts | The proposal's battle-count heatmap needs comparison counts the leaderboard dataset does not publish. Out of scope. |
 | `raw_payload` / `source_metadata` exposure | Kept for troubleshooting, never returned by the API — the API serves normalized fields only, so an upstream schema change is a backend concern rather than a breaking change for the frontend. |
+| A Hacker News thread's full comment tree as JSON | The comments are rows, because keyword search has to reach comment text and a blob cannot answer that on SQLite. The thread's `raw_payload` keeps the story's own fields plus the key-set observed on comment nodes — what actually diagnoses drift — rather than duplicating megabytes of the same text. |
+| Unfetched Hacker News comments | The busiest threads run past 2,500 comments, so a tree is capped at `LEADERBOARD_HN_MAX_STORED_COMMENTS`. The thread records `tree_truncated` and both counts, so the shortfall is visible rather than looking like a quiet discussion. |
+
+---
+
+## 7. Hacker News — Algolia search API
+
+**Endpoints:** `GET https://hn.algolia.com/api/v1/search_by_date` for discovery,
+`GET https://hn.algolia.com/api/v1/items/{id}` for a comment tree.
+**Auth:** none. The API is open, so there is no key to configure, no `configured:
+false` state, and nothing here is a secret.
+
+### Why the official Firebase API is not used
+
+The feature draft named both APIs. Only Algolia is implemented, and the arithmetic
+is the reason:
+
+| Operation | Firebase | Algolia |
+|---|---|---|
+| Find candidates filtered by points/comments/date | none — `topstories.json` returns 500 ids with no metadata, so filtering means fetching 500 items to look at them | 1 request; `numericFilters` does it server-side |
+| Full tree for a 360-comment thread | ~361 requests (one per comment) | **1** |
+| Hourly cost for this design | ~3,600+/hour | ~65–80/hour |
+
+Neither API needs a key, so Firebase offers no auth advantage. A second source
+would buy a second error taxonomy, a second test fake, a second schema-drift
+surface, and an arbitration rule for "which source wins" — which `SyncRun`'s
+per-source partial unique index actively discourages. One source, one client, one
+set of rules.
+
+### Two properties that fail *silently*
+
+**The 1,000-result ceiling.** `hitsPerPage * page` cannot exceed 1,000, and past
+it the API returns a *plausible-looking truncated set* rather than an error. A
+single query covering the whole retention window would therefore lose its oldest
+days while looking complete. Two guards: the window is queried in
+`LEADERBOARD_HN_WINDOW_SLICE_DAYS` slices (7 days by default, so a fortnight is
+two queries, newest first), and the client refuses a page beyond the ceiling
+rather than reading one. `nbHits` is compared against what was actually collected,
+and the difference is reported as `window_truncated`.
+
+**Enormous payloads.** A thousand-comment thread is megabytes of JSON, so
+`Content-Length` is checked *before* the body is read. A chunked response has no
+such header, which is why there are two further guards rather than one: a
+pre-flight refusal above `LEADERBOARD_HN_MAX_COMMENTS` (which spends no request at
+all), and an ingest cap of `LEADERBOARD_HN_MAX_STORED_COMMENTS` on what is kept.
+
+The **stored cap** is the one that binds, and the gap up to the refusal is not
+slack -- it is the widest discussion that can be shown at all. A thread above the
+refusal keeps no comments and is skipped by every run, so it presents exactly like
+one whose tree has not been fetched yet: a real limitation, visible in the UI, and
+the reason the two numbers are documented together.
+Truncation is recorded as `tree_truncated` on the thread, because a silently
+short discussion reads as a complete one.
+
+That refusal is deliberately generous (3,000). It guards download size only —
+storage is already bounded by the stored cap — and the busiest threads on the site
+routinely pass 1,500 comments, so a tight refusal would drop exactly the
+discussions most worth reading.
+
+### Discovery, in two streams
+
+**The window query** is the primary source of truth: `search_by_date` with
+`numericFilters` on `created_at_i`, `points` and `num_comments`, so the floor is
+applied by the server. Because `search_by_date` orders by recency, ranking is
+computed **locally** afterwards.
+
+**A budgeted keyword sweep** is the coverage hedge: at most
+`LEADERBOARD_HN_KEYWORD_QUERY_BUDGET` queries per run, walked round-robin over a
+priority term list, catching a genuinely relevant thread that sits below the
+points floor.
+
+The sweep has its **own, lower** floor (`LEADERBOARD_HN_SWEEP_MIN_*`, 30 points /
+5 comments). That is not a refinement but a correction found on live data: with no
+floor at all, the sweep dragged in 556 of the first 633 stored threads at under 20
+comments, some with two points, because a date bound is not a relevance bar. The
+two floors answer different questions -- the window's is "is this one of the
+notable stories of the period?", the sweep's is "is this a real discussion rather
+than trivia?" -- and reusing the window's would make the sweep unable to find
+anything the window had not already found. The cursor lives in the previous successful run's `SyncRun.summary`
+— it is a *position*, not a fact, so losing it costs one repeated sweep rather than
+any correctness. Round-robin rather than sweeping everything keeps the hourly cost
+constant however large the vocabulary grows.
+
+Relevance is decided on the **title and link domain only**, never the comment
+bodies: it is settled at discovery time, before any tree has been fetched, and a
+story that only becomes about LLMs three hundred comments deep is not what "an
+LLM-related thread" means. The terms that fired are stored on the thread, so "why
+is this in the bank?" is answerable from the row.
+
+### Retention — the one place this project DELETEs
+
+Every other source here records measurements the project owns, so a row that
+vanishes upstream is deactivated and **never** deleted: our copy is the last one,
+and the previous state has to stay inspectable.
+
+A Hacker News thread is the opposite. `GET /items/{id}` keeps serving it forever,
+so an aged-out row is a **re-fetchable cache entry** rather than the last copy of a
+measurement. A thread leaves the bank in one of two ways, and both are the same question --
+"is this still something we keep?":
+
+* **Too old** — posted before `LEADERBOARD_HN_WINDOW_DAYS` (14).
+* **Below the floor** — under `LEADERBOARD_HN_SWEEP_MIN_POINTS` /
+  `LEADERBOARD_HN_SWEEP_MIN_COMMENTS`, or with a comment count Hacker News does
+  not report. Applying the floor here and not only at discovery is what keeps the
+  floors *the retention policy* rather than a rule consulted once: an operator who
+  raises them sees the bank follow, and the run reports how much moved under
+  `threads_below_floor`.
+
+The floor applied is the **sweep's**, deliberately, not the window's. Raising the
+window floor is a discovery decision and should change what is *found*, not
+silently empty what is already stored.
+
+Either way the thread is deleted outright, with its comments and tags, in the same
+transaction as the run's writes — which also means a `--dry-run` rolls the prune back with everything
+else, so the effect of a window change can be inspected before it deletes
+anything. Recovery from a mistake is one `manage.py refresh_discussions` run.
+
+The safety this buys is worth stating: age-based pruning makes membership
+**monotonic**. `posted_at` is immutable and the cutoff only moves forward, so
+nothing can re-enter the bank. That single property removes the need for an
+`is_active` flag, for a miss-counter suppressing hysteresis at a rank boundary, and
+for a stored `is_top` — ranking is a plain `ORDER BY`, and the table's contents
+*are* the served set.
+
+### Matching prose to entities
+
+§3 forbids similarity scoring, Levenshtein, substring and prefix matching, and the
+tests enforce it. Matching Hacker News prose against a vocabulary sounds like the
+thing that rule forbids, so the resolution is a **scoping argument backed by exact
+mechanics**:
+
+> §3 compares *two records the sources state*. This compares *a string against a
+> table a human wrote*, producing advisory tags on discussion content. It never
+> produces a `ModelMatch`, never influences `/overview/`, `/models/{key}/` or
+> `/unmatched/`, and never feeds the ladder. No scoring exists in either.
+
+Three modes, all exact, all in `hn_matching.py`:
+
+| Mode | Rule | Fires | Refuses |
+|---|---|---|---|
+| `word` | the alias equals one whole word | `openai` on "OpenAI's API" | `openai-compatible` |
+| `token_run` | the alias's tokens equal a whole hyphen-joined token run | `gpt-5` on "GPT-5" | "GPT-5-mini" |
+| `token_prefix` | the alias's tokens lead one word, optionally followed by a version number | `gpt` on "GPT-5" and "GPT4"; `qwen` on "Qwen3" | `rag` on "rage"; `phi` on "philosophy" |
+
+`token_prefix` is what keeps the vocabulary a list of *subjects* rather than an
+enumeration of versions that goes stale on every release. It is a **token**-level
+prefix and never a character-level one — any flush remainder must begin with a
+digit — which is what makes writing a vendor stem down safe. It is for vendor and
+service stems, not model variants: marking `gpt-5` as a prefix is how "GPT-5-mini"
+would wrongly inherit GPT-5's identity, and that stays a rule a reviewer keeps,
+because the mode is per-alias and visible in the admin.
+
+The escape hatch for everything the rules refuse is a reviewed alias in
+`ProviderAlias`, seeded from `hn_vocabulary.py` by migration `0009` and editable in
+the admin. `alias_key` is **globally unique**, so two entities cannot both claim
+"claude": the database refuses the insert rather than the matcher picking a winner.
+
+### What a tag is, and when it is rebuilt
+
+A tag is a stored row, not an inference — matching runs at ingest, which is what
+lets the API's filter be a join and keeps the read path unable to reach the
+network. Two consequences follow, and both are deliberate:
+
+* **Title tags are rebuilt on every run.** One matcher call per thread, and
+  skipping it would leave a thread whose tree was deferred this hour with no tags
+  at all — not even the one its own title earned.
+* **Comment tags are rebuilt only when the tree was refetched.** The alternative
+  is loading a few hundred thousand comment rows into memory every hour to redo
+  work that has not changed. So a change to a *comment* alias reaches an existing
+  thread through `manage.py refresh_discussions --skip-discovery`, which forces the
+  refetch, or automatically once that thread's comment count moves. Deleting a
+  `ProviderEntity` cascades its tags away by the same route.

@@ -19,17 +19,24 @@ The "don't destroy the last good data" rules are enforced at this layer:
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
+from django.db.models import Q
+
 from .constants import SUCCESSFUL_STATUSES, SyncStatus
+from .hn_parsing import ParsedComment, ParsedStoryHit, ParsedTree
 from .matching import Claim
 from .models import (
+    DiscussionTag,
+    HNComment,
+    HNThread,
     LLMModel,
     LMArenaEntry,
     ModelCreator,
     ModelMatch,
+    ProviderEntity,
     SyncRun,
     UnmatchedRecord,
 )
@@ -576,3 +583,376 @@ class UnmatchedLedger:
     @property
     def count(self) -> int:
         return len(self._touched_ids)
+
+
+# --------------------------------------------------------------------------- #
+# Hacker News discussions
+# --------------------------------------------------------------------------- #
+#
+# This is the one place in the app that DELETEs a source table, and the reason is
+# that a discussion is not the same kind of thing as a model measurement.
+#
+# The no-DELETE rule exists so *the previous state stays inspectable*. For a
+# model that vanishes from LMArena or Artificial Analysis, our row is the last
+# copy -- upstream has forgotten it, and deleting would destroy the only record.
+# A Hacker News thread is the opposite: `GET https://hn.algolia.com/api/v1/items/{id}`
+# keeps serving it forever, so an aged-out row is a re-fetchable cache entry and
+# its loss is recoverable by one `manage.py refresh_discussions` run.
+#
+# That is what makes age-based pruning safe, and age-based pruning in turn is
+# what lets membership be monotonic: `posted_at` is immutable and the cutoff only
+# moves forward, so nothing can re-enter the bank. No `is_active` flag, no
+# miss-counter for hysteresis at a rank boundary, no stored `is_top` -- ranking is
+# a plain ORDER BY and the table's contents *are* the served set.
+
+
+def _hn_hit_provenance(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """A trimmed copy of a discovery hit, for provenance.
+
+    Algolia attaches `_highlightResult` and `_rankingInfo` blobs that are several
+    times the size of the record itself and say nothing about the story, so keys
+    prefixed with `_` are dropped. What is left is what a reviewer would want when
+    asking "where did this row come from?".
+    """
+    return {str(key): value for key, value in raw.items() if not str(key).startswith("_")}
+
+
+def upsert_hn_thread_discovery(
+    story: ParsedStoryHit,
+    *,
+    terms: Sequence[str],
+    rank_score: float,
+    discovered_by: Sequence[str],
+    synced_at: datetime,
+    stats: UpsertStats,
+) -> tuple[HNThread, str]:
+    """Write the discovery metadata for one story. Returns ``(thread, outcome)``.
+
+    Deliberately does **not** touch any tree field. A thread is discovered on one
+    run and its tree may be fetched on another (or several), so a discovery
+    upsert that wrote `comments_stored`, `fetched_at` or `raw_payload` would blank
+    a tree that is perfectly good merely because this hour's refetch budget went
+    elsewhere.
+    """
+    thread = HNThread.objects.filter(hn_id=story.hn_id).first()
+
+    provenance = _hn_hit_provenance(story.raw)
+    values: dict[str, Any] = {
+        "title": story.title,
+        "url": story.url,
+        "domain": story.domain,
+        "author": story.author,
+        "points": story.points,
+        "num_comments": story.num_comments,
+        "posted_at": story.posted_at,
+        "relevance_terms": list(terms),
+        "rank_score": rank_score,
+    }
+
+    if thread is None:
+        thread = HNThread(
+            hn_id=story.hn_id,
+            first_seen_at=synced_at,
+            last_synced_at=synced_at,
+            source_metadata={
+                "discovered_by": sorted(set(discovered_by)),
+                "hit": provenance,
+            },
+            **values,
+        )
+        thread.save()
+        stats.created += 1
+        return thread, "created"
+
+    # Union rather than replace: a thread found by the window query last hour and
+    # by the keyword sweep this hour was found by both, and collapsing that to
+    # whichever ran last would lose the record of how it was discovered.
+    previous = set((thread.source_metadata or {}).get("discovered_by") or ())
+    values["source_metadata"] = {
+        "discovered_by": sorted(previous | set(discovered_by)),
+        "hit": provenance,
+    }
+
+    changed = _apply(thread, values)
+    thread.last_synced_at = synced_at
+    thread.save(update_fields=[*values.keys(), "last_synced_at"])
+
+    outcome = "updated" if changed else "unchanged"
+    setattr(stats, outcome, getattr(stats, outcome) + 1)
+    return thread, outcome
+
+
+def record_hn_tree(
+    thread: HNThread,
+    tree: ParsedTree,
+    *,
+    synced_at: datetime,
+) -> None:
+    """Write what a tree fetch produced, on the thread row.
+
+    The counts are stored rather than derived on read, because the read path is
+    not allowed to count rows to describe a thread -- the list endpoint would make
+    one aggregate query per row.
+    """
+    thread.comments_stored = len(tree.comments)
+    thread.max_depth = tree.max_depth
+    thread.tree_truncated = tree.truncated
+    thread.fetched_at = synced_at
+    thread.raw_payload = tree.skeleton
+    thread.save(
+        update_fields=[
+            "comments_stored",
+            "max_depth",
+            "tree_truncated",
+            "fetched_at",
+            "raw_payload",
+        ]
+    )
+
+
+@dataclass
+class CommentWriteStats:
+    """What one thread's comment upsert did.
+
+    Deliberately **not** folded into `UpsertStats`. The `SyncRun` counters
+    describe one population, and for this source that population is *threads*:
+    mixing comments in would report `created` above `seen`, because discovery only
+    ever sees stories. Comment volume belongs in the run's `summary`, where it can
+    be read as its own number.
+    """
+
+    rows: dict[int, HNComment] = field(default_factory=dict)
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+
+
+def upsert_hn_comments(
+    thread: HNThread,
+    comments: Sequence[ParsedComment],
+    *,
+    synced_at: datetime,
+) -> CommentWriteStats:
+    """Bulk-upsert one thread's comments, keyed by HN comment id.
+
+    The returned rows are the point of the return value as much as the counts: the
+    tag writer needs *rows*, because a `DiscussionTag` points at a comment by
+    foreign key and a tag on a comment created moments ago cannot be built from
+    the parsed payload alone.
+
+    Bulk rather than the per-row `_upsert` helper, and that is a concurrency
+    decision rather than a stylistic one: `_upsert` issues a SELECT and an UPDATE
+    per row, so 600 comments would be ~1,200 statements inside a single `IMMEDIATE`
+    transaction, holding SQLite's write lock for seconds while the API's reads
+    queue behind it. This loads the thread's rows in one query, diffs in memory,
+    and writes in two statements.
+
+    Parents are resolved in a second pass because a `bulk_create` is the only
+    point at which the new rows have primary keys. `parent_hn_id` is written in the
+    first pass and is what the API actually serves; the FK is integrity, not the
+    read path.
+    """
+    existing = {row.hn_id: row for row in HNComment.objects.filter(thread=thread)}
+    stats = CommentWriteStats(rows=dict(existing))
+
+    created: list[HNComment] = []
+    touched: list[HNComment] = []
+
+    for item in comments:
+        values: dict[str, Any] = {
+            "parent_hn_id": item.parent_hn_id,
+            "depth": item.depth,
+            "sibling_index": item.sibling_index,
+            "path": item.path,
+            "author": item.author,
+            "text_html": item.text.html,
+            "text_plain": item.text.text,
+            "is_deleted": item.is_deleted,
+            "is_dead": item.is_dead,
+            "points": item.points,
+            "posted_at": item.posted_at,
+        }
+        row = existing.get(item.hn_id)
+
+        if row is None:
+            row = HNComment(
+                thread=thread,
+                hn_id=item.hn_id,
+                first_seen_at=synced_at,
+                last_synced_at=synced_at,
+                **values,
+            )
+            created.append(row)
+            stats.rows[item.hn_id] = row
+            stats.created += 1
+            continue
+
+        changed = _apply(row, values)
+        row.last_synced_at = synced_at
+        touched.append(row)
+        if changed:
+            stats.updated += 1
+        else:
+            stats.unchanged += 1
+
+    if created:
+        HNComment.objects.bulk_create(created)
+
+    # `parent_hn_id` arrived with the payload, so the FK is derived from data we
+    # already hold. Read the mapping back rather than relying on `bulk_create`
+    # populating pks, which is backend-dependent.
+    pk_by_hn_id = dict(
+        HNComment.objects.filter(thread=thread).values_list("hn_id", "pk")
+    )
+    re_parented: list[HNComment] = []
+    for item in comments:
+        row = stats.rows.get(item.hn_id)
+        if row is None:  # pragma: no cover -- every parsed comment is in the map
+            continue
+        desired = (
+            pk_by_hn_id.get(item.parent_hn_id) if item.parent_hn_id is not None else None
+        )
+        if row.parent_id != desired:
+            row.parent_id = desired
+            re_parented.append(row)
+
+    value_fields = [
+        "parent_hn_id",
+        "depth",
+        "sibling_index",
+        "path",
+        "author",
+        "text_html",
+        "text_plain",
+        "is_deleted",
+        "is_dead",
+        "points",
+        "posted_at",
+    ]
+    if touched:
+        HNComment.objects.bulk_update(touched, [*value_fields, "last_synced_at"])
+    if re_parented:
+        HNComment.objects.bulk_update(re_parented, ["parent_id"])
+
+    return stats
+
+
+def replace_title_tags(
+    thread: HNThread,
+    tags: Sequence[tuple[None, ProviderEntity, str, str, int]],
+    *,
+    synced_at: datetime,
+) -> int:
+    """Rebuild a thread's title-level tags.
+
+    Deletes only the tags whose `comment` is null, so it composes with
+    `replace_comment_tags` rather than fighting it. Splitting them is what lets
+    the title be re-tagged on **every** run -- it costs one matcher call per thread
+    -- while comment tags are rebuilt only when the tree was refetched. Without the
+    split, a thread whose tree was not fetched this hour would carry no tags at
+    all, not even the one its own title earned.
+    """
+    thread.tags.filter(comment__isnull=True).delete()
+    return _create_tags(thread, tags, synced_at=synced_at)
+
+
+def replace_comment_tags(
+    thread: HNThread,
+    tags: Sequence[tuple[HNComment | None, ProviderEntity, str, str, int]],
+    *,
+    synced_at: datetime,
+) -> int:
+    """Rebuild a thread's per-comment tags, leaving the title's alone.
+
+    Deleted and recreated rather than merged, because a tag is **derived** data --
+    the same standing `ModelMatch` has, and the same exception the no-DELETE rule
+    already makes for it. Rebuilding means a tag whose alias was withdrawn cannot
+    linger, which a merge would leave behind with no way to notice.
+
+    Called only for threads whose tree was fetched, so a change to a *comment*
+    tag's alias reaches an existing thread through
+    `manage.py refresh_discussions --skip-discovery`, which forces the refetch.
+    Rebuilding every stored thread's comment tags on every hourly run instead would
+    mean loading a few hundred thousand comment rows into memory each hour to redo
+    work that had not changed.
+
+    **A consequence worth knowing before editing the vocabulary:** deleting a
+    `ProviderEntity` cascades its tags away, and the next run only rebuilds them
+    for threads it refetches. So withdrawing an entity in the admin silently
+    un-tags the stored comments that named it -- until each thread's comment count
+    moves, or `--skip-discovery` is run once. That is the same boundary as an
+    alias edit, arrived at through the FK rather than through the matcher.
+    """
+    thread.tags.filter(comment__isnull=False).delete()
+    return _create_tags(thread, tags, synced_at=synced_at)
+
+
+def _create_tags(thread, tags, *, synced_at: datetime) -> int:
+    rows = [
+        DiscussionTag(
+            thread=thread,
+            comment=comment,
+            entity=entity,
+            matched_text=matched_text[:120],
+            match_mode=mode,
+            mentions=mentions,
+            first_seen_at=synced_at,
+            last_synced_at=synced_at,
+        )
+        for comment, entity, matched_text, mode, mentions in tags
+    ]
+    if rows:
+        DiscussionTag.objects.bulk_create(rows)
+    return len(rows)
+
+
+def prune_out_of_policy(
+    *,
+    cutoff: datetime,
+    min_points: int,
+    min_comments: int,
+    stats: UpsertStats,
+) -> tuple[int, int]:
+    """Delete threads the retention policy no longer covers. Returns `(total, below_floor)`.
+
+    Two ways out of the bank, and they are the same question asked twice -- "is
+    this thread still something we keep?":
+
+    * **Too old.** Older than the retention window.
+    * **Below the floor.** Fewer points or fewer comments than the bar, or a
+      comment count Hacker News does not report. Applying the floor here rather
+      than only at discovery is what keeps the floors *the retention policy*
+      instead of a rule consulted once: a reviewer who raises them sees the bank
+      follow, and the run reports how much moved under `threads_below_floor`.
+
+    The floor passed in is the **sweep's**, deliberately, not the window's. The
+    window floor answers "is this one of the notable stories of the period?" and
+    belongs to discovery; raising it should change what is *found*, not silently
+    empty what is already stored. The sweep floor answers "is this a real
+    discussion rather than trivia?", which is the bar worth holding a stored row to.
+
+    The one DELETE against a source table in this app -- see the section header for
+    why a Hacker News thread's loss is recoverable when a model row's is not.
+    `comments` and `tags` follow by `on_delete=CASCADE`, in the caller's
+    transaction, so a dry run rolls the whole thing back.
+
+    Counted into `records_deactivated`, which for this source means "removed from
+    the served set" rather than "flagged inactive" -- the column is the
+    source-neutral removal counter, and inventing a parallel one would leave
+    `/metadata/`'s per-run counters unable to describe an HN run.
+    """
+    doomed = HNThread.objects.filter(
+        Q(posted_at__lt=cutoff)
+        | Q(points__lt=min_points)
+        | Q(num_comments__lt=min_comments)
+        # A thread with no reported count cannot be shown to clear the floor, so it
+        # does not stay. `num_comments__lt` is NULL for such a row and SQL NULL
+        # comparisons are never true, which is why this needs saying separately.
+        | Q(num_comments__isnull=True)
+    )
+    below_floor = doomed.filter(posted_at__gte=cutoff).count()
+    total = doomed.count()
+    if total:
+        doomed.delete()
+    stats.deactivated += total
+    return total, below_floor

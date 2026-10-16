@@ -38,10 +38,11 @@ from ..constants import (
     Source,
     UNMATCHED_ORDERING,
     UnmatchedReason,
+    hn_config,
     stale_after_seconds,
 )
 from ..models import LLMModel, ModelMatch, SyncRun, UnmatchedRecord
-from . import params, selectors, serializers
+from . import discussion_selectors, params, selectors, serializers
 from .errors import InvalidParameter, ModelIncomplete, UnknownValue
 from .pagination import LeaderboardPagination
 
@@ -496,6 +497,17 @@ class MetadataView(LeaderboardView):
                 "categories": [selectors.category_summary(c) for c in CATEGORIES],
                 "matching": selectors.matching_tallies(),
                 "recent_runs": recent,
+                # Hacker News discussions, reported as their own top-level key
+                # rather than folded into `sources` above. That block is the
+                # per-source freshness of the *model* rows a response carries, and
+                # it is typed on the frontend as exactly two sources; a third key
+                # would put discussion freshness on `/overview/` and widen a
+                # contract for no gain. The body is the same shape, built by the
+                # same `source_freshness`, so the freshness badge behaves
+                # identically wherever it is rendered.
+                "discussions": discussion_selectors.discussion_freshness(
+                    stale_after_seconds=hn_config().stale_after_seconds
+                ),
                 "config": {
                     "harness_fold_enabled": bool(
                         getattr(settings, "LEADERBOARD_ENABLE_HARNESS_FOLD", True)

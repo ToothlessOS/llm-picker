@@ -25,12 +25,13 @@ import pytest
 
 from leaderboard.clients.artificial_analysis import ArtificialAnalysisClient
 from leaderboard.clients.exceptions import TransportError
+from leaderboard.clients.hackernews import HackerNewsClient
 from leaderboard.clients.http import RetryPolicy
 from leaderboard.constants import Source, SyncStatus
 from leaderboard.models import LMArenaEntry, ModelAlias
-from leaderboard.services import refresh
+from leaderboard.services import discussions, refresh
 from leaderboard.tests.fakes import FakeTransport, SleepRecorder, upper_bound_uniform
-from leaderboard.tests.test_api import BASE, seed
+from leaderboard.tests.test_api import BASE, seed, seed_discussions
 
 # --------------------------------------------------------------------------- #
 # The surfaces under comparison
@@ -50,6 +51,14 @@ DATA_ENDPOINTS = (
     "/models/claude-opus-5-high/",
     "/models/claude-opus-5-low/",
     "/unmatched/",
+    # Discussions. In the comparison because their served rows are written by the
+    # same pipeline contract: a re-run must move only bookkeeping, and a failed
+    # refresh must leave every stored thread and comment byte-identical.
+    "/discussions/",
+    "/discussions/?page_size=100",
+    "/discussions/?entity=anthropic",
+    "/discussions/?search=claude",
+    "/discussions/entities/",
 )
 
 #: Endpoints whose *answer* is a 404. They belong in the comparison as much as
@@ -84,6 +93,10 @@ BOOKKEEPING_KEYS = frozenset(
         "last_matched_at",
         "last_seen_at",
         "occurrences",
+        # Discussions: when the thread row was touched by the run, and when its
+        # tree was last pulled. Both record *that* a refresh happened.
+        "last_updated_at",
+        "fetched_at",
     }
 )
 
@@ -192,6 +205,7 @@ class TestTheWholePipeline:
     def test_every_endpoint_answers_from_stored_data(self, client):
         """One run of the real pipeline, then every surface read over HTTP."""
         seed()
+        seed_discussions()
 
         body = snapshot(client)
 
@@ -232,9 +246,11 @@ class TestTheWholePipeline:
         scrubber honest by naming exactly what moved.
         """
         seed()
+        seed_discussions()
         before = snapshot(client)
 
         seed()
+        seed_discussions()
         after = snapshot(client)
 
         moved = {
@@ -288,6 +304,7 @@ class TestAFailedRefresh:
         only thing that did move is the status report in `meta`.
         """
         seed()
+        seed_discussions()
         before = snapshot(client)
 
         run = refresh.refresh_aa(client=dead_aa_client(), use_lock=False)
@@ -309,8 +326,12 @@ class TestAFailedRefresh:
             assert all(
                 leaf == "meta.generated_at"
                 or leaf.startswith(f"meta.sources.{Source.ARTIFICIAL_ANALYSIS.value}.")
+                # A *different source's* status block, which may move because its
+                # own `age_seconds` is derived from the clock on every request.
+                # The claim under test is that no served *row* moved.
+                or leaf.startswith("meta.discussions.")
                 for leaf in paths
-            ), f"{path} changed something other than the AA status block: {paths}"
+            ), f"{path} changed something other than a status block: {paths}"
 
         # The failed attempt is genuinely reported, not silently skipped...
         assert any(
@@ -330,6 +351,7 @@ class TestAFailedRefresh:
         what moved, this one cannot miss a field the first forgot to enumerate.
         """
         seed()
+        seed_discussions()
         before = snapshot(client)
 
         refresh.refresh_aa(client=dead_aa_client(), use_lock=False)
@@ -538,6 +560,7 @@ class TestWireFormat:
 
     def test_the_body_round_trips_through_json(self, client):
         seed()
+        seed_discussions()
 
         for path, (_, body) in snapshot(client).items():
             assert json.loads(json.dumps(body)) == body, f"{path} is not plain JSON"
@@ -619,3 +642,129 @@ def test_the_body_comparator_can_see_a_difference():
     after["a"]["b"] = 2
     after["d"][1] = 3
     assert differing_paths(before, after) == {"a.b", "d.1"}
+
+
+def dead_hn_client() -> HackerNewsClient:
+    """An HN client whose transport can never succeed.
+
+    The same shape as `dead_aa_client`, and for the same reason: the transport is
+    injected, so this exercises *our* retry loop rather than a library's
+    interception. It raises `TransportError` because that is the contract
+    `RequestsTransport` upholds -- every `requests.RequestException` becomes one at
+    the seam, and the client's retry loop catches nothing else.
+    """
+    return HackerNewsClient(
+        transport=FakeTransport(
+            lambda index: TransportError(
+                "Hacker News is unreachable", detail={"attempt": index + 1}
+            )
+        ),
+        sleep=SleepRecorder(),
+        uniform=upper_bound_uniform,
+        retry_policy=RetryPolicy(max_attempts=2, base_delay=0.01, max_delay=0.02),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# A failed discussion refresh changes nothing but its own status
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.django_db
+class TestAFailedDiscussionRefresh:
+    def test_every_stored_thread_and_comment_survives(self, client):
+        """The same promise the model sources make, for a source that *deletes*.
+
+        This one carries more weight than its model-side twin, because a
+        discussion run prunes by age. A failure must therefore leave the bank
+        exactly as it was -- no threads removed, no comments touched, no tags
+        rewritten -- and the whole-run `transaction.atomic()` is what guarantees
+        it: discovery never completed, so the write phase never began.
+        """
+        seed()
+        seed_discussions()
+        before = snapshot(client)
+
+        run = discussions.refresh_discussions(client=dead_hn_client(), use_lock=False)
+        after = snapshot(client)
+
+        assert run.status == SyncStatus.FAILED.value
+        assert run.error_code == "transport_error"
+
+        strays: dict[str, list[str]] = {}
+        for path in ALL_ENDPOINTS:
+            moved = differing_paths(before[path][1], after[path][1])
+            if moved:
+                strays[path] = sorted(moved)
+
+        for path, paths in strays.items():
+            assert not [leaf for leaf in paths if leaf.startswith("results")], (
+                f"{path} served different rows after a failed discussion refresh: {paths}"
+            )
+            assert all(
+                leaf == "meta.generated_at"
+                or leaf.startswith(f"meta.sources.{Source.ARTIFICIAL_ANALYSIS.value}.")
+                or leaf.startswith(f"meta.sources.{Source.LMARENA.value}.")
+                or leaf.startswith("meta.discussions.")
+                for leaf in paths
+            ), f"{path} changed something other than a status block: {paths}"
+
+        # The attempt is reported rather than silently skipped...
+        assert any(
+            "meta.discussions.last_status" in paths for paths in strays.values()
+        )
+
+    def test_nothing_is_pruned_by_a_run_that_failed(self, client):
+        """The pruning-specific half of the same promise.
+
+        A failed run must not age anything out. Restated as a count because the
+        consequence is a *deletion*, which a body comparison would report only as
+        a shorter list -- and a shorter list is exactly what a reader might
+        attribute to a filter.
+        """
+        from leaderboard.models import HNComment, HNThread
+
+        seed()
+        seed_discussions()
+        threads_before = HNThread.objects.count()
+        comments_before = HNComment.objects.count()
+
+        discussions.refresh_discussions(client=dead_hn_client(), use_lock=False)
+
+        assert HNThread.objects.count() == threads_before
+        assert HNComment.objects.count() == comments_before
+
+    def test_the_last_good_refresh_is_still_reported(self, client):
+        """Success and freshness are never conflated: the data being served is
+        still good, it is the *run* that failed."""
+        seed_discussions()
+        good = client.get(f"{BASE}/discussions/").json()["meta"]["discussions"]
+
+        discussions.refresh_discussions(client=dead_hn_client(), use_lock=False)
+        state = client.get(f"{BASE}/discussions/").json()["meta"]["discussions"]
+
+        assert state["last_status"] == SyncStatus.FAILED.value
+        assert state["last_success_at"] == good["last_success_at"]
+        assert state["last_error"]["code"] == "transport_error"
+        assert state["is_stale"] is False
+
+    def test_the_failed_run_is_visible_in_recent_runs(self, client):
+        seed_discussions()
+
+        discussions.refresh_discussions(client=dead_hn_client(), use_lock=False)
+        recent = client.get(f"{BASE}/metadata/").json()["recent_runs"]
+
+        assert recent[0]["status"] == SyncStatus.FAILED.value
+        assert recent[0]["source"] == Source.HACKERNEWS.value
+
+    def test_hacker_news_still_does_not_appear_in_meta_sources(self, client):
+        """Even in `/metadata/`, where every source is otherwise enumerated."""
+        seed_discussions()
+
+        body = client.get(f"{BASE}/metadata/").json()
+
+        assert set(body["sources"]) == {
+            Source.LMARENA.value,
+            Source.ARTIFICIAL_ANALYSIS.value,
+        }
+        assert body["discussions"]["counts"]["threads"] == 1

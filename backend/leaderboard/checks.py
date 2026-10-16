@@ -154,3 +154,149 @@ def num_proxies_is_sane(app_configs, **kwargs):
             id="leaderboard.E005",
         )
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Hacker News discussions
+# --------------------------------------------------------------------------- #
+
+
+@register()
+def hackernews_settings_are_coherent(app_configs, **kwargs) -> list[Error | Warning]:
+    """The Hacker News tunables have to agree with each other, not just parse.
+
+    Every value here is a plausible number on its own, which is exactly why the
+    relationships between them are what needs checking. Each failure below is
+    silent in production:
+
+    * `hits_per_page * max_page` above 1,000 would have Algolia return a
+      *plausible truncated* set rather than an error, so the run's
+      `window_truncated` flag would be the only hint that the window was not
+      fully read.
+    * `MAX_STORED_COMMENTS > MAX_COMMENTS` would put the truncation cap above the
+      pre-flight refusal, so the cap could never bind.
+    * `WINDOW_SLICE_DAYS > WINDOW_DAYS` would leave part of the retention window
+      unqueried while the slices still looked exhaustive.
+    * A negative floor would admit every story ever posted.
+
+    Precedent is the throttle rates above: a configuration mistake that degrades
+    a guarantee should refuse to boot rather than announce itself in a log line.
+    """
+    from .constants import HN_PAGINATION_CEILING, hn_config
+
+    cfg = hn_config()
+    errors: list[Error | Warning] = []
+
+    def fail(message: str, hint: str, identifier: str) -> None:
+        errors.append(Error(message, hint=hint, id=identifier))
+
+    if cfg.window_days < 1:
+        fail(
+            f"LEADERBOARD_HN_WINDOW_DAYS is {cfg.window_days}.",
+            "Retention is measured in days; use 1 or more.",
+            "leaderboard.E006",
+        )
+
+    if cfg.window_slice_days < 1 or cfg.window_slice_days > cfg.window_days:
+        fail(
+            f"LEADERBOARD_HN_WINDOW_SLICE_DAYS is {cfg.window_slice_days}, outside "
+            f"1..{cfg.window_days}.",
+            (
+                "The slice width must divide the retention window into the queries "
+                "that read it. A slice wider than the window leaves days unqueried; "
+                "one narrower than a day multiplies requests for nothing."
+            ),
+            "leaderboard.E007",
+        )
+
+    if cfg.hits_per_page < 1 or cfg.max_page < 1:
+        fail(
+            f"Hacker News pagination is degenerate: hits_per_page="
+            f"{cfg.hits_per_page}, max_page={cfg.max_page}.",
+            "Both must be at least 1.",
+            "leaderboard.E008",
+        )
+    elif cfg.hits_per_page * cfg.max_page > HN_PAGINATION_CEILING:
+        fail(
+            f"LEADERBOARD_HN_HITS_PER_PAGE * LEADERBOARD_HN_MAX_PAGE is "
+            f"{cfg.hits_per_page * cfg.max_page}, above Algolia's "
+            f"{HN_PAGINATION_CEILING}-result ceiling.",
+            (
+                "Past that ceiling the search API returns a shorter list as though it "
+                "were the whole result set, so a truncated window would look complete. "
+                "Lower LEADERBOARD_HN_MAX_PAGE, or rely on the window slices."
+            ),
+            "leaderboard.E009",
+        )
+
+    if cfg.max_stored_comments < 1:
+        fail(
+            f"LEADERBOARD_HN_MAX_STORED_COMMENTS is {cfg.max_stored_comments}.",
+            "The ingest cap must be at least 1, or no thread could ever store a comment.",
+            "leaderboard.E010",
+        )
+    elif cfg.max_stored_comments > cfg.max_comments:
+        fail(
+            f"LEADERBOARD_HN_MAX_STORED_COMMENTS ({cfg.max_stored_comments}) exceeds "
+            f"LEADERBOARD_HN_MAX_COMMENTS ({cfg.max_comments}).",
+            (
+                "The second is the pre-flight refusal, so a cap above it could never "
+                "bind -- every thread would already have been refused before the "
+                "truncation applied. Keep the stored cap at or below the refusal."
+            ),
+            "leaderboard.E011",
+        )
+
+    if cfg.min_points < 0 or cfg.min_comments < 0:
+        fail(
+            f"Hacker News floors are negative: points={cfg.min_points}, "
+            f"comments={cfg.min_comments}.",
+            "A negative floor would admit every story ever posted.",
+            "leaderboard.E012",
+        )
+
+    if cfg.sweep_min_points < 0 or cfg.sweep_min_comments < 0:
+        fail(
+            f"Hacker News sweep floors are negative: points={cfg.sweep_min_points}, "
+            f"comments={cfg.sweep_min_comments}.",
+            "A negative floor would admit every story ever posted.",
+            "leaderboard.E014",
+        )
+    elif (
+        cfg.sweep_min_points > cfg.min_points
+        or cfg.sweep_min_comments > cfg.min_comments
+    ):
+        # The sweep exists to reach what the window's floor excludes, so a sweep
+        # floor above it makes the whole stream unable to find anything new --
+        # while still spending its requests every hour.
+        fail(
+            "The Hacker News sweep floor is above the window floor: "
+            f"sweep=({cfg.sweep_min_points}, {cfg.sweep_min_comments}) vs "
+            f"window=({cfg.min_points}, {cfg.min_comments}).",
+            (
+                "The keyword sweep reaches threads *below* the window's floor, so "
+                "raising it above that floor makes the sweep unable to find anything "
+                "the window had not already found. Keep it lower -- it is also the "
+                "bar a stored thread must clear to remain in the bank."
+            ),
+            "leaderboard.E015",
+        )
+
+    if cfg.keyword_query_budget < 0:
+        fail(
+            f"LEADERBOARD_HN_KEYWORD_QUERY_BUDGET is {cfg.keyword_query_budget}.",
+            "Use 0 to disable the keyword sweep, or a positive number of queries per run.",
+            "leaderboard.E013",
+        )
+
+    if cfg.max_trees_per_run < 1:
+        errors.append(
+            Warning(
+                f"LEADERBOARD_HN_MAX_TREES_PER_RUN is {cfg.max_trees_per_run}, so no "
+                "comment tree will ever be fetched.",
+                hint="Set it to at least 1, or the bank will hold threads with no comments.",
+                id="leaderboard.W002",
+            )
+        )
+
+    return errors
