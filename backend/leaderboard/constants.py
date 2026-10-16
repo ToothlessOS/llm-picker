@@ -5,6 +5,8 @@ list, which metric column family a category carries, the ordering/filter
 whitelists the API exposes, and the tuning constants for retrieval and matching.
 """
 
+from dataclasses import dataclass
+
 from django.db import models
 
 # --------------------------------------------------------------------------- #
@@ -13,10 +15,25 @@ from django.db import models
 
 
 class Source(models.TextChoices):
-    """Where a record came from. Shared by SyncRun, UnmatchedRecord and ModelAlias."""
+    """Where a record came from. Shared by SyncRun, UnmatchedRecord and ModelAlias.
+
+    `HACKERNEWS` is a source for *run bookkeeping only*. It is deliberately absent
+    from `selectors.freshness_summary()`, which feeds `meta.sources` on every
+    endpoint: that block is the per-source freshness of the rows you are reading,
+    and Hacker News discussions are not models. Reporting them there would put
+    discussion freshness on `/overview/` and widen a contract the frontend types
+    as `{lmarena, artificial_analysis}`. HN freshness is served under
+    `meta.discussions` instead.
+
+    What the enum *does* buy is the whole run-bookkeeping apparatus, unchanged:
+    `run_lock(Source.HACKERNEWS)`, the `SyncRun` partial unique index that stops
+    two HN runs overlapping without blocking a model refresh, and
+    `source_freshness()`.
+    """
 
     LMARENA = "lmarena", "LMArena"
     ARTIFICIAL_ANALYSIS = "artificial_analysis", "Artificial Analysis"
+    HACKERNEWS = "hackernews", "Hacker News"
 
 
 # --------------------------------------------------------------------------- #
@@ -302,12 +319,382 @@ UNMATCHED_ORDERING: dict[str, str] = {
     "last_seen_at": "last_seen_at",
 }
 
+#: Ordering keys accepted by `/discussions/`.
+#:
+#: `rank_score` leads because it is the stored "up-votes / number of comments"
+#: figure the feature ranks by; the two components are exposed separately so a
+#: reader who disagrees with the weighting can reorder without a deploy.
+#: `comments_stored` sits beside `num_comments` deliberately: when a thread's tree
+#: was truncated, the gap between them is the thing worth seeing.
+DISCUSSION_ORDERING: dict[str, str] = {
+    "rank_score": "rank_score",
+    "points": "points",
+    "num_comments": "num_comments",
+    "comments_stored": "comments_stored",
+    "posted_at": "posted_at",
+    "fetched_at": "fetched_at",
+    "title": "title",
+    "domain": "domain",
+}
+
 DEFAULT_OVERVIEW_ORDERING: tuple[str, ...] = ("rank",)
 DEFAULT_UNMATCHED_ORDERING: tuple[str, ...] = ("source", "category", "reason", "model_key")
 DEFAULT_AA_ORDERING: tuple[str, ...] = ("-intelligence_index",)
 DEFAULT_CATEGORY_ORDERING: tuple[str, ...] = ("rank",)
+DEFAULT_DISCUSSION_ORDERING: tuple[str, ...] = ("-rank_score",)
 
 #: Pagination bounds. `page_size` above the max is clamped rather than rejected;
 #: a non-integer `page_size` is a 400.
 DEFAULT_PAGE_SIZE: int = 50
 MAX_PAGE_SIZE: int = 200
+
+#: `/discussions/` defaults to the draft's "top 10" rather than the site-wide 50.
+#: The full retained bank stays reachable via `?page_size=`.
+DEFAULT_DISCUSSION_PAGE_SIZE: int = 10
+
+
+# --------------------------------------------------------------------------- #
+# Hacker News discussions
+# --------------------------------------------------------------------------- #
+
+
+class EntityKind(models.TextChoices):
+    """Which of the two filter dropdowns an entity belongs to.
+
+    The draft's phrase "companies / service / provider" names two genuinely
+    different things, and conflating them makes both useless: filtering by
+    *Anthropic* and filtering by *Cursor* answer different questions.
+
+    There is deliberately no third kind for model variants. Tagging free text
+    with an exact model variant is the least reliable match of the three, and a
+    thread tagged `claude-opus-5-high` is a much stronger claim than one tagged
+    `anthropic` -- so it is out of scope rather than shipped at lower precision.
+    """
+
+    VENDOR = "vendor", "Model vendor"
+    SERVICE = "service", "Service / product"
+
+
+class MatchMode(models.TextChoices):
+    """How a `ProviderAlias` fires against free text.
+
+    All three modes are **exact**, and none of them does similarity scoring or
+    partial credit -- see `hn_matching.py` for why the project's anti-fuzzy rule
+    survives this module intact.
+
+    The three exist because a vocabulary has to answer two different questions,
+    and one rule cannot answer both:
+
+    * *"Is this word the thing I named?"* -- ``word``. `openai` fires on
+      "OpenAI's" and not on "openai-compatible".
+    * *"Is this phrase the thing I named?"* -- ``token_run``. `google deepmind`
+      fires on both spellings of that phrase, and `gpt-5` still refuses
+      "GPT-5-mini".
+    * *"Is this a version of the vendor I named?"* -- ``token_prefix``. This is
+      the one the other two cannot express, and without it `gpt` does not fire on
+      "GPT-5" at all, so a thread titled "GPT-5 released" would not even be
+      recognised as an LLM thread.
+
+    ``token_prefix`` is the one the other two cannot express, and without it `gpt`
+    does not fire on "GPT-5" at all, so a thread titled "GPT-5 released" would not
+    even be recognised as an LLM thread. It matches a leading token run, **or a
+    leading run followed by a version number written flush against it** -- so
+    `qwen` reaches "Qwen3" as well as "Qwen-3", which matters because that is the
+    spelling the project's own normalized model keys use (`qwen3-8-flash-next`).
+
+    It is a **token**-level prefix, never a character-level one -- the alias's
+    tokens must be a *leading, complete* token sequence, and any flush remainder
+    must begin with a digit. `gpt` therefore fires on "GPT-5" and "GPT-5-mini" but
+    not on "gptx", `rag` fires on "rag-pipeline" but not on "rage", and `phi`
+    fires on "phi-3" and "phi3" but not on "philosophy" -- which is what makes it
+    safe to write a vendor stem down. It is for **vendor and service stems**, not
+    for model variants: marking `gpt-5` as a prefix is how "GPT-5-mini" would
+    wrongly inherit GPT-5's identity, and that is a rule a reviewer has to keep,
+    because the mode is per-alias and visible in the admin for exactly that
+    reason.
+    """
+
+    #: The alias equals one whole word. `openai` fires on "OpenAI's API".
+    WORD = "word", "Whole word"
+    #: The alias's tokens equal the *whole* hyphen-joined token run of a word, or
+    #: of a run of consecutive words. `gpt-5` fires on "GPT-5" and **not** on
+    #: "GPT-5-mini"; `google deepmind` fires on "Google DeepMind".
+    TOKEN_RUN = "token_run", "Whole token run"
+    #: The alias's tokens are a *leading* token sequence of one word, optionally
+    #: followed directly by a version number. `gpt` fires on "GPT-5" and "GPT4";
+    #: `qwen` fires on "Qwen3"; `llama` fires on "llama-3-8b". The word must carry
+    #: something beyond the alias, so a bare "gpt" is not matched by this mode.
+    TOKEN_PREFIX = "token_prefix", "Leading token run"
+
+
+#: Terms that make a Hacker News story relevant to this project's subject, used
+#: by the local relevance filter. Matched as `token_prefix`, so `gpt` reaches
+#: "GPT-5" and `claude` reaches "claude-3-opus" -- the list is a list of
+#: *subjects*, not an enumeration of versions that would go stale on every
+#: release. It is still exact: an alias has to be a leading, complete token
+#: sequence, so `rag` does not reach "rage".
+#:
+#: **Inflection is not covered**, because a token-level prefix cannot reach it:
+#: `llms` is one token, not `llm` plus `s`. Both spellings are listed where both
+#: are common, and a missing one is fixed by adding a line here rather than by
+#: loosening the matcher -- so every term stays one a human chose.
+#:
+#: This list is code-reviewed configuration rather than a database table, on the
+#: `HARNESS_SUFFIXES` precedent: it is evidence-based, small, and changing it is a
+#: deploy-worthy decision. The *provider aliases* are different in kind -- those
+#: are per-mention judgements a reviewer makes, which is why they live in
+#: `ProviderAlias` and are editable in the admin.
+HN_RELEVANCE_TERMS: tuple[str, ...] = (
+    # Vendors
+    "openai",
+    "anthropic",
+    "google deepmind",
+    "deepmind",
+    "meta ai",
+    "mistral",
+    "deepseek",
+    "alibaba",
+    "moonshot",
+    "minimax",
+    "zhipu",
+    "xai",
+    "cohere",
+    "hugging face",
+    "huggingface",
+    "stability ai",
+    "nvidia",
+    # Models and families
+    "llm",
+    "llms",
+    "gpt",
+    "chatgpt",
+    "claude",
+    "gemini",
+    "gemma",
+    "llama",
+    "qwen",
+    "kimi",
+    "glm",
+    "grok",
+    "phi",
+    "command r",
+    "muse spark",
+    # Services and tooling
+    "copilot",
+    "cursor",
+    "windsurf",
+    "aider",
+    "cline",
+    "ollama",
+    "vllm",
+    "llama.cpp",
+    "lm studio",
+    "openrouter",
+    "bedrock",
+    "vertex ai",
+    "codex",
+    "claude code",
+    "gemini cli",
+    # Technical vocabulary. Inflections are listed explicitly -- see the note above.
+    "transformer",
+    "transformers",
+    "mixture of experts",
+    "quantization",
+    "gguf",
+    "lora",
+    "fine-tuning",
+    "finetuning",
+    "rag",
+    "retrieval augmented generation",
+    "embeddings",
+    "vector database",
+    "vector databases",
+    "context window",
+    "context windows",
+    "reasoning model",
+    "reasoning models",
+    "chain of thought",
+    "prompt engineering",
+    "ai agent",
+    "ai agents",
+    "agentic",
+    "mcp",
+    "model context protocol",
+    "tokenizer",
+    "tokenizers",
+    "distillation",
+    "rlhf",
+    "diffusion model",
+    "diffusion models",
+    "multimodal",
+)
+
+#: The priority subset swept over the search API (Stream B). Each term costs one
+#: request per sweep, so this is the shortlist of terms distinctive enough that a
+#: story mentioning one is worth a query on its own. Must be a subset of
+#: `HN_RELEVANCE_TERMS`; asserted by a test so the two cannot drift.
+HN_SWEEP_TERMS: tuple[str, ...] = (
+    "llm",
+    "chatgpt",
+    "claude",
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "llama",
+    "qwen",
+    "mistral",
+    "grok",
+    "cursor",
+    "copilot",
+    "ollama",
+    "vllm",
+    "hugging face",
+    "openrouter",
+    "fine-tuning",
+    "ai agent",
+    "model context protocol",
+)
+
+#: Stems whose *unmatched* occurrences are worth reporting.
+#:
+#: `claude` deliberately does not match "claude-3-opus" (see `hn_matching.py`), so
+#: a stem appearing hundreds of times while tagging nothing is the signal that a
+#: human should write an alias. This is the review loop that grows the vocabulary,
+#: and it is the reason refusing a prefix mode is affordable rather than merely
+#: principled.
+HN_ALIAS_WATCHLIST: tuple[str, ...] = (
+    "gpt",
+    "claude",
+    "gemini",
+    "llama",
+    "qwen",
+    "mistral",
+    "grok",
+    "deepseek",
+)
+
+
+# Defaults for every Hacker News tunable. `settings.py` declares each of these as
+# a `LEADERBOARD_HN_*` environment setting with the same literal default, which is
+# the precedent `DEFAULT_STALE_AFTER_SECONDS` set. The duplication exists because
+# this module must be importable **without settings configured** -- `api/` reads
+# these through `hn_config()` on the request path -- and a test asserts the two
+# sets agree, so they cannot silently drift.
+DEFAULT_HN_ENABLED: bool = True
+DEFAULT_HN_BASE_URL: str = "https://hn.algolia.com/api/v1"
+DEFAULT_HN_WINDOW_DAYS: int = 14
+DEFAULT_HN_WINDOW_SLICE_DAYS: int = 7
+DEFAULT_HN_MIN_POINTS: int = 100
+DEFAULT_HN_MIN_COMMENTS: int = 20
+DEFAULT_HN_SWEEP_MIN_POINTS: int = 30
+DEFAULT_HN_SWEEP_MIN_COMMENTS: int = 5
+DEFAULT_HN_COMMENT_WEIGHT: float = 1.0
+DEFAULT_HN_MAX_TREES_PER_RUN: int = 60
+DEFAULT_HN_KEYWORD_QUERY_BUDGET: int = 8
+DEFAULT_HN_HITS_PER_PAGE: int = 100
+DEFAULT_HN_MAX_PAGE: int = 9
+DEFAULT_HN_MAX_COMMENTS: int = 3000
+DEFAULT_HN_MAX_STORED_COMMENTS: int = 2500
+DEFAULT_HN_MAX_ITEM_BYTES: int = 8_000_000
+DEFAULT_HN_TREE_TIMEOUT_SECONDS: float = 45.0
+DEFAULT_HN_RUN_BUDGET_SECONDS: int = 600
+DEFAULT_HN_MAX_INLINE_RETRY_AFTER_SECONDS: int = 60
+DEFAULT_HN_STALE_AFTER_SECONDS: int = 2 * 3600
+
+#: Algolia's hard ceiling: `hitsPerPage * page` cannot exceed 1,000, and past it
+#: the API returns a plausible-looking truncated set rather than an error. Kept
+#: here so the client, the service and the checks all quote one number.
+HN_PAGINATION_CEILING: int = 1000
+
+
+@dataclass(frozen=True)
+class HNConfig:
+    """Every Hacker News tunable, resolved once per call.
+
+    A frozen value object rather than a pile of `getattr` calls at each use site,
+    so a caller that needs four of them reads one object and cannot accidentally
+    mix a configured value with a default.
+    """
+
+    enabled: bool
+    base_url: str
+    window_days: int
+    window_slice_days: int
+    min_points: int
+    min_comments: int
+    sweep_min_points: int
+    sweep_min_comments: int
+    comment_weight: float
+    max_trees_per_run: int
+    keyword_query_budget: int
+    hits_per_page: int
+    max_page: int
+    max_comments: int
+    max_stored_comments: int
+    max_item_bytes: int
+    tree_timeout_seconds: float
+    run_budget_seconds: int
+    max_inline_retry_after_seconds: int
+    stale_after_seconds: int
+
+
+def hn_config() -> HNConfig:
+    """The effective Hacker News configuration.
+
+    Read lazily through `getattr` so that importing this module never requires
+    Django settings to be configured -- the same reason `stale_after_seconds()`
+    exists, and what lets `api/` read these without importing the service layer.
+    """
+    from django.conf import settings
+
+    def read(name: str, default):
+        return getattr(settings, name, default)
+
+    return HNConfig(
+        enabled=bool(read("LEADERBOARD_HN_ENABLED", DEFAULT_HN_ENABLED)),
+        base_url=str(read("LEADERBOARD_HN_BASE_URL", DEFAULT_HN_BASE_URL)),
+        window_days=int(read("LEADERBOARD_HN_WINDOW_DAYS", DEFAULT_HN_WINDOW_DAYS)),
+        window_slice_days=int(
+            read("LEADERBOARD_HN_WINDOW_SLICE_DAYS", DEFAULT_HN_WINDOW_SLICE_DAYS)
+        ),
+        min_points=int(read("LEADERBOARD_HN_MIN_POINTS", DEFAULT_HN_MIN_POINTS)),
+        min_comments=int(read("LEADERBOARD_HN_MIN_COMMENTS", DEFAULT_HN_MIN_COMMENTS)),
+        sweep_min_points=int(
+            read("LEADERBOARD_HN_SWEEP_MIN_POINTS", DEFAULT_HN_SWEEP_MIN_POINTS)
+        ),
+        sweep_min_comments=int(
+            read("LEADERBOARD_HN_SWEEP_MIN_COMMENTS", DEFAULT_HN_SWEEP_MIN_COMMENTS)
+        ),
+        comment_weight=float(
+            read("LEADERBOARD_HN_COMMENT_WEIGHT", DEFAULT_HN_COMMENT_WEIGHT)
+        ),
+        max_trees_per_run=int(
+            read("LEADERBOARD_HN_MAX_TREES_PER_RUN", DEFAULT_HN_MAX_TREES_PER_RUN)
+        ),
+        keyword_query_budget=int(
+            read("LEADERBOARD_HN_KEYWORD_QUERY_BUDGET", DEFAULT_HN_KEYWORD_QUERY_BUDGET)
+        ),
+        hits_per_page=int(read("LEADERBOARD_HN_HITS_PER_PAGE", DEFAULT_HN_HITS_PER_PAGE)),
+        max_page=int(read("LEADERBOARD_HN_MAX_PAGE", DEFAULT_HN_MAX_PAGE)),
+        max_comments=int(read("LEADERBOARD_HN_MAX_COMMENTS", DEFAULT_HN_MAX_COMMENTS)),
+        max_stored_comments=int(
+            read("LEADERBOARD_HN_MAX_STORED_COMMENTS", DEFAULT_HN_MAX_STORED_COMMENTS)
+        ),
+        max_item_bytes=int(read("LEADERBOARD_HN_MAX_ITEM_BYTES", DEFAULT_HN_MAX_ITEM_BYTES)),
+        tree_timeout_seconds=float(
+            read("LEADERBOARD_HN_TREE_TIMEOUT_SECONDS", DEFAULT_HN_TREE_TIMEOUT_SECONDS)
+        ),
+        run_budget_seconds=int(
+            read("LEADERBOARD_HN_RUN_BUDGET_SECONDS", DEFAULT_HN_RUN_BUDGET_SECONDS)
+        ),
+        max_inline_retry_after_seconds=int(
+            read(
+                "LEADERBOARD_HN_MAX_INLINE_RETRY_AFTER_SECONDS",
+                DEFAULT_HN_MAX_INLINE_RETRY_AFTER_SECONDS,
+            )
+        ),
+        stale_after_seconds=int(
+            read("LEADERBOARD_HN_STALE_AFTER_SECONDS", DEFAULT_HN_STALE_AFTER_SECONDS)
+        ),
+    )

@@ -3,6 +3,7 @@ import {
   Boxes,
   DatabaseZap,
   Gauge,
+  MessagesSquare,
   type LucideIcon,
 } from 'lucide-react'
 import { NavLink, useLocation } from 'react-router-dom'
@@ -26,6 +27,7 @@ const dataNavigation: NavigationItem[] = [
   { label: 'Models', path: '/models', icon: Gauge },
   { label: 'Categories', path: '/categories', icon: BarChart3 },
   { label: 'AA Models', path: '/artificial-analysis', icon: Boxes },
+  { label: 'Discussions', path: '/discussions', icon: MessagesSquare },
   { label: 'Data Quality', path: '/data-quality', icon: DatabaseZap },
 ]
 

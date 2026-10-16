@@ -403,13 +403,37 @@ class TestBeatSchedule:
 
         assert [(moment.hour, moment.minute) for moment in converted] == [(0, 0), (12, 0)]
 
-    def test_only_the_orchestrator_is_scheduled(self):
-        """One entry, one task. LMArena and AA are refreshed inside `refresh_all`
-        in-process, because AA's retention and matching both read the agent set
-        LMArena just wrote -- scheduling them independently would let AA match
-        against a stale agent set on a cold database."""
-        assert list(settings.CELERY_BEAT_SCHEDULE) == [SCHEDULE_KEY]
+    def test_the_model_sources_are_not_scheduled_independently(self):
+        """The model refresh is **one** scheduled task, not three.
+
+        LMArena and AA are refreshed inside `refresh_all` in-process, because AA's
+        retention and matching both read the agent set LMArena just wrote --
+        scheduling them independently would let AA match against a stale agent set
+        on a cold database.
+
+        Asserted by *task name* rather than by counting entries, so adding a
+        genuinely independent source (the hourly Hacker News refresh) does not
+        require weakening this, while splitting the model refresh still fails it.
+        """
+        scheduled_tasks = {
+            entry["task"] for entry in settings.CELERY_BEAT_SCHEDULE.values()
+        }
+
         assert settings.CELERY_BEAT_SCHEDULE[SCHEDULE_KEY]["task"] == "leaderboard.refresh_all"
+        assert "leaderboard.refresh_lmarena" not in scheduled_tasks
+        assert "leaderboard.refresh_aa" not in scheduled_tasks
+
+    def test_each_scheduled_source_owns_its_task(self):
+        """Two sources, two tasks -- and no task scheduled twice.
+
+        A task appearing under two keys would run twice per period, which for the
+        model refresh means spending a second slice of the shared Artificial
+        Analysis quota, and for discussions means two tree-fetch budgets racing.
+        """
+        tasks = [entry["task"] for entry in settings.CELERY_BEAT_SCHEDULE.values()]
+
+        assert len(tasks) == len(set(tasks))
+        assert "leaderboard.refresh_discussions" in tasks
 
     def test_a_late_run_expires_rather_than_firing_stale(self):
         """If beat was down for a day, the missed run is worse than useless: it

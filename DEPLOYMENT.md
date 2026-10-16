@@ -120,7 +120,7 @@ sudo -u deploy docker compose config -q && echo "configuration OK"
 
 ```bash
 cd /opt/llm-picker/backend
-sudo -u deploy docker compose up -d --build
+  
 ```
 
 Containers start in a defined order:

@@ -22,7 +22,9 @@ from django.db.models import Q
 
 from .constants import (
     Category,
+    EntityKind,
     MatchMethod,
+    MatchMode,
     MetricKind,
     Source,
     SyncStatus,
@@ -389,3 +391,312 @@ class ModelAlias(models.Model):
 
     def __str__(self) -> str:
         return f"{self.raw_name} -> {self.canonical_key}"
+
+
+# --------------------------------------------------------------------------- #
+# Hacker News discussions
+# --------------------------------------------------------------------------- #
+#
+# A third source, with a different lifecycle from the two leaderboards.
+#
+# The model tables record *measurements this project owns*, latest-only, and a
+# model that vanishes upstream is deactivated rather than deleted so the previous
+# state stays inspectable. Discussions are different in kind: they are a
+# re-fetchable cache of a public conversation that HN keeps serving forever, so
+# they are pruned by age (see `persistence.delete_aged_out_threads`). That is the
+# one place in this app where a source table is DELETEd, and the justification
+# lives in `docs/data-sources.md`.
+#
+# Membership is **age-based, not rank-based**. A thread is in the bank iff it is
+# LLM-related and was posted inside the retention window. Because `posted_at` is
+# immutable and the cutoff only moves forward, nothing can re-enter -- which is
+# what removes the need for an `is_active` flag, a miss-counter for hysteresis at
+# a rank boundary, and a stored `is_top`. Ranking is a plain `ORDER BY`.
+
+
+class ProviderEntity(models.Model):
+    """A canonical company or service, for filtering discussions.
+
+    A dedicated table rather than a reuse of what exists, because neither
+    existing representation can carry this:
+
+    * `ModelCreator` is AA-scoped, keyed by AA's UUID, and its `name` mixes
+      vendors with non-vendors (`Poolside`, `Inception`) while having no row at
+      all for a *service*.
+    * `LMArenaEntry.organization` is a free-text string, not a FK, and has no
+      row for ChatGPT, Cursor, Ollama or OpenRouter -- which is most of what a
+      Hacker News thread is actually about.
+
+    The existing hardcoded frontend `PROVIDER_LABELS` map is the symptom of this
+    table having been missing.
+    """
+
+    slug = models.CharField(max_length=64, unique=True)
+    label = models.CharField(max_length=120)
+    kind = models.CharField(max_length=16, choices=EntityKind.choices)
+    #: For a service, the vendor that ships it -- `claude` -> `anthropic`. This is
+    #: what makes a provider filter useful: a thread that only ever says "Claude"
+    #: is still an Anthropic thread, and without the roll-up the Provider dropdown
+    #: would miss most of the discussion. Null for a vendor itself.
+    vendor = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="services",
+    )
+    #: The exact `LMArenaEntry.organization` spelling for this vendor, when it
+    #: publishes models there. Used only to cross-link to
+    #: `/categories/agent/?organization=...`. Deliberately **not** a FK: the
+    #: organization string is verbatim upstream text, and a FK would couple this
+    #: reviewed vocabulary to LMArena's spelling of the day.
+    lmarena_organization = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["kind", "label"]
+        verbose_name_plural = "provider entities"
+        indexes = [models.Index(fields=["is_active", "kind"])]
+
+    def __str__(self) -> str:
+        return f"{self.label} ({self.kind})"
+
+
+class ProviderAlias(models.Model):
+    """A reviewed spelling that tags a discussion with an entity.
+
+    The same philosophy as `ModelAlias`, and for the same reason: an alias is a
+    judgement a human made, consulted before anything else, so seeding it with
+    guesses would defeat the point. `hn_matching.py` performs an **exact** lookup
+    against this table and infers nothing.
+    """
+
+    entity = models.ForeignKey(
+        ProviderEntity, on_delete=models.CASCADE, related_name="aliases"
+    )
+    #: The spelling verbatim, as the reviewer saw it. Kept so the admin shows what
+    #: was actually observed rather than only the normalized form.
+    alias_text = models.CharField(max_length=120)
+    #: `normalize_model_key(alias_text)` -- the lookup key.
+    alias_key = models.CharField(max_length=120)
+    match_mode = models.CharField(
+        max_length=16, choices=MatchMode.choices, default=MatchMode.WORD
+    )
+    note = models.CharField(max_length=255, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["entity", "alias_key"]
+        verbose_name_plural = "provider aliases"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["entity", "alias_key"],
+                name="uniq_provider_alias_entity_key",
+            ),
+            # One alias belongs to exactly ONE entity, globally. Two entities both
+            # claiming "claude" would make every resulting tag ambiguous, so the
+            # database refuses the insert rather than the matcher picking a winner.
+            # This is the project's "never guess" rule expressed where an admin
+            # form cannot bypass it.
+            models.UniqueConstraint(
+                fields=["alias_key"],
+                name="uniq_provider_alias_key",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.alias_text} -> {self.entity.slug}"
+
+
+class HNThread(models.Model):
+    """One Hacker News story and its discussion.
+
+    Upsert key: `hn_id` (Algolia's `objectID`, the numeric HN item id), so hourly
+    re-discovery rewrites the same rows and a second identical run changes
+    nothing but bookkeeping.
+    """
+
+    hn_id = models.BigIntegerField(unique=True)
+    title = models.TextField()
+    #: The submitted link. Empty for Ask/Show HN text posts.
+    url = models.TextField(blank=True, default="")
+    #: Hostname of `url`, extracted at ingest so no reader parses URLs.
+    domain = models.CharField(max_length=255, blank=True, default="")
+    author = models.CharField(max_length=255, blank=True, default="")
+
+    #: Upstream-reported, and NULL means "not reported" -- never 0. A 0-point
+    #: story is a real value and stays 0, exactly as the AA schema requires.
+    points = models.IntegerField(null=True, blank=True)
+    num_comments = models.IntegerField(null=True, blank=True)
+
+    # -- what we actually stored, so the API never counts rows to describe a thread -- #
+    comments_stored = models.IntegerField(default=0)
+    max_depth = models.IntegerField(default=0)
+    #: True when the tree hit `LEADERBOARD_HN_MAX_STORED_COMMENTS`. Surfaced to the
+    #: reader, because a silently truncated discussion looks like a complete one.
+    tree_truncated = models.BooleanField(default=False)
+
+    #: Which relevance terms fired, so "why is this thread in the bank?" is
+    #: answerable from the row. Filtered with `JSONField__contains`.
+    relevance_terms = models.JSONField(default=list, blank=True)
+
+    #: `points + comment_weight * num_comments`, stored rather than computed so the
+    #: read path can ORDER BY a plain column.
+    rank_score = models.FloatField(null=True, blank=True)
+
+    posted_at = models.DateTimeField()
+    #: When the comment tree was last pulled. Distinct from `last_synced_at`, which
+    #: moves whenever the thread row is touched by a run -- the refetch gate reads
+    #: this one.
+    fetched_at = models.DateTimeField(null=True, blank=True)
+
+    first_seen_at = models.DateTimeField()
+    last_synced_at = models.DateTimeField()
+
+    #: The discovery hit verbatim, plus which stream found it. Never exposed.
+    source_metadata = models.JSONField(default=dict, blank=True)
+    #: The `items/{id}` tree verbatim, subject to the ingest cap. Kept for
+    #: schema-drift forensics, exactly as `LLMModel.raw_payload` is. Never exposed.
+    raw_payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-rank_score", "-hn_id"]
+        indexes = [
+            models.Index(fields=["-rank_score"]),
+            models.Index(fields=["-posted_at"]),
+            models.Index(fields=["domain"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"HN {self.hn_id}: {self.title[:60]}"
+
+
+class HNComment(models.Model):
+    """One comment in one thread.
+
+    Real rows rather than a JSON blob, and that is the load-bearing choice: the
+    feature requires keyword search over comment text, which a blob cannot answer
+    on SQLite without pulling every thread into Python and parsing it.
+
+    Identity is `hn_id`. `path` is an **ordering**, derivable from the fetched tree
+    and liable to change if HN ever reorders siblings -- so it is never the key.
+    """
+
+    thread = models.ForeignKey(
+        HNThread, on_delete=models.CASCADE, related_name="comments"
+    )
+    hn_id = models.BigIntegerField(unique=True)
+    #: Null when the parent is absent from the stored tree. `SET_NULL` rather than
+    #: `CASCADE`, because a parent can legitimately be missing (HN deletes
+    #: comments; a truncated tree can lose one) and deleting a child with it would
+    #: quietly discard a live subthread.
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="replies",
+    )
+    #: Kept **alongside** the FK so an orphan is still placeable at read time
+    #: rather than being silently re-rooted and reading as a top-level comment.
+    parent_hn_id = models.BigIntegerField(null=True, blank=True)
+
+    depth = models.IntegerField(default=0)
+    #: Position among siblings, in the order the tree was fetched.
+    sibling_index = models.IntegerField(default=0)
+    #: Zero-padded `sibling_index` segments joined by ".", e.g.
+    #: "000000.000004.000002". Orderable in SQL, and a prefix test answers "is X a
+    #: descendant of Y" in one indexed query -- which is how the ancestor closure
+    #: for search results is done server-side.
+    path = models.CharField(max_length=255)
+
+    author = models.CharField(max_length=255, blank=True, default="")
+    #: Sanitized against the allowlist in `hn_text.py`. **This is the trust
+    #: boundary** -- the API ships it and the frontend renders it as HTML.
+    text_html = models.TextField(blank=True, default="")
+    #: Whitespace-normalized text for search, truncation and accessibility.
+    text_plain = models.TextField(blank=True, default="")
+
+    #: HN rendered "[deleted]" / "[flagged]". Kept as a row, because its replies
+    #: survive and would otherwise be orphaned.
+    is_deleted = models.BooleanField(default=False)
+    is_dead = models.BooleanField(default=False)
+    points = models.IntegerField(null=True, blank=True)
+    posted_at = models.DateTimeField(null=True, blank=True)
+
+    first_seen_at = models.DateTimeField()
+    last_synced_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ["path", "pk"]
+        indexes = [
+            models.Index(fields=["thread", "path"]),
+            models.Index(fields=["thread", "depth"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"HN comment {self.hn_id} in {self.thread_id}"
+
+
+class DiscussionTag(models.Model):
+    """One matched mention, with the alias that produced it.
+
+    The provenance **is** the review record -- the same argument `ModelMatch`
+    makes. "Why is this thread tagged Anthropic?" answers itself: `matched_text`
+    is the exact string that fired and `match_mode` is the rule that let it.
+    """
+
+    thread = models.ForeignKey(
+        HNThread, on_delete=models.CASCADE, related_name="tags"
+    )
+    #: Null means the mention was in the thread's title, url or domain; non-null
+    #: means it was in that comment.
+    comment = models.ForeignKey(
+        HNComment,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="tags",
+    )
+    entity = models.ForeignKey(
+        ProviderEntity, on_delete=models.CASCADE, related_name="tags"
+    )
+    matched_text = models.CharField(max_length=120)
+    match_mode = models.CharField(max_length=16, choices=MatchMode.choices)
+    #: How many times the alias fired in that scope, so a thread can be ranked by
+    #: how much it actually discusses something.
+    mentions = models.PositiveIntegerField(default=1)
+
+    first_seen_at = models.DateTimeField()
+    last_synced_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            # Two constraints rather than one, because SQLite treats NULLs as
+            # distinct in a unique index: a single
+            # `(thread, comment, entity)` constraint would permit unlimited
+            # title-level rows for the same entity.
+            models.UniqueConstraint(
+                fields=["thread", "comment", "entity"],
+                condition=Q(comment__isnull=False),
+                name="uniq_discussion_tag_on_comment",
+            ),
+            models.UniqueConstraint(
+                fields=["thread", "entity"],
+                condition=Q(comment__isnull=True),
+                name="uniq_discussion_tag_on_thread",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["thread"]),
+            models.Index(fields=["entity", "thread"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.matched_text} -> {self.entity_id}"

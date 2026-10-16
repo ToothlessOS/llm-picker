@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import transaction
 
 from .. import persistence as store
 from ..clients.artificial_analysis import DEFAULT_BASE_URL, ArtificialAnalysisClient
@@ -61,14 +61,17 @@ from ..models import LMArenaEntry, ModelAlias, SyncRun
 from ..normalization import normalize_model_key
 from ..persistence import UnmatchedLedger, UpsertStats
 from ..validation import ValidationError, parse_aa_model, parse_lmarena_row
+from .runbook import (
+    STALE_RUNNING_SECONDS,
+    claim_run as _claim_run,
+    counters as _counters,
+    skipped as _skipped,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Lock scope used by `refresh_all`, which serialises both sources together.
 ALL_SOURCES_LOCK = "all"
-
-#: A `running` row older than this is assumed to belong to a dead worker.
-STALE_RUNNING_SECONDS = 6 * 3600
 
 # Which ledger owns which reasons. Each (source, reason) pair appears in exactly
 # one set, so no phase can close out another phase's rows as stale. The split is
@@ -122,81 +125,6 @@ def build_aa_client(**overrides: Any) -> ArtificialAnalysisClient:
 
 def build_lmarena_client(**overrides: Any) -> LMArenaClient:
     return LMArenaClient(**overrides)
-
-
-# --------------------------------------------------------------------------- #
-# Run bookkeeping helpers
-# --------------------------------------------------------------------------- #
-
-
-def _counters(stats: UpsertStats) -> dict[str, int]:
-    return {
-        "records_seen": stats.seen,
-        "records_created": stats.created,
-        "records_updated": stats.updated,
-        "records_unchanged": stats.unchanged,
-        "records_deactivated": stats.deactivated,
-        "records_failed": stats.failed,
-        "records_deduplicated": stats.deduplicated,
-        "anomalies_recorded": stats.anomalies,
-    }
-
-
-def _skipped(
-    source: str,
-    *,
-    triggered_by: str,
-    dry_run: bool,
-    celery_task_id: str,
-    code: str,
-    message: str,
-) -> SyncRun:
-    """Record "we chose not to run" as its own outcome.
-
-    A skip is neither a success nor a failure: it must not refresh
-    `last_success_at`, and it must not look like an error either. The frontend
-    reads it as "still running" and keeps showing the previous data.
-    """
-    now = store.utcnow()
-    return SyncRun.objects.create(
-        source=source,
-        status=SyncStatus.SKIPPED.value,
-        triggered_by=triggered_by,
-        dry_run=dry_run,
-        celery_task_id=celery_task_id,
-        started_at=now,
-        finished_at=now,
-        duration_ms=0,
-        error_code=code,
-        error_message=message,
-    )
-
-
-def _claim_run(
-    source: str,
-    *,
-    triggered_by: str,
-    dry_run: bool,
-    celery_task_id: str,
-) -> SyncRun | None:
-    """Open a `running` row, or `None` when one is already open for this source.
-
-    `None` means the conditional unique index fired -- the database-level
-    overlap lock, which is the backstop for when Redis is unreachable and
-    `run_lock` had to degrade to "acquired".
-    """
-    try:
-        # A nested atomic block makes the IntegrityError recoverable rather than
-        # poisoning the outer transaction.
-        with transaction.atomic():
-            return store.open_run(
-                source,
-                triggered_by=triggered_by,
-                dry_run=dry_run,
-                celery_task_id=celery_task_id,
-            )
-    except IntegrityError:
-        return None
 
 
 # --------------------------------------------------------------------------- #

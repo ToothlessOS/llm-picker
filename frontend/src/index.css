@@ -27,6 +27,35 @@
   --color-cost-cache-hit: #5c7370;
   --color-cost-unspecified: #c9c0b4;
   --shadow-header: none;
+  /*
+   * The discussion map's entity palette.
+   *
+   * Fourteen hues, chosen to stay apart as *fills* at a 14px block height, and
+   * defined as custom properties rather than hex literals so a theme flip is
+   * resolved by the browser with no JavaScript — the reason the map can be plain
+   * DOM while the scatter chart needs a MutationObserver and a redraw.
+   *
+   * They are assigned per thread, not globally: the map colours every entity it
+   * finds, and a global mapping of 52 entities onto 14 hues would give two
+   * entities in the same view the same colour, which makes the encoding lie.
+   */
+  --map-hue-1: #176b68;
+  --map-hue-2: #b45a1b;
+  --map-hue-3: #7a4e9a;
+  --map-hue-4: #2f6fad;
+  --map-hue-5: #3d7a4a;
+  --map-hue-6: #a33b3b;
+  --map-hue-7: #8b5e06;
+  --map-hue-8: #1d4e89;
+  --map-hue-9: #0f766e;
+  --map-hue-10: #9c4d1a;
+  --map-hue-11: #4a5568;
+  --map-hue-12: #6b3fa0;
+  --map-hue-13: #5c6b2a;
+  --map-hue-14: #8a3a5c;
+  /* A block that mentions nobody, and the ring around a search hit. */
+  --color-map-neutral: #ded7cb;
+  --color-search-glow: #e8b931;
   --radius-sm: 2px;
   --radius-md: 4px;
   --content-width: 1180px;
@@ -67,6 +96,23 @@
   --color-cost-cache-write: #d4894a;
   --color-cost-cache-hit: #8a9c99;
   --color-cost-unspecified: #3d4c48;
+  /* Lifted and slightly desaturated so the same hues read against #1c2624. */
+  --map-hue-1: #3f9d99;
+  --map-hue-2: #d9873f;
+  --map-hue-3: #a878c9;
+  --map-hue-4: #5b9ade;
+  --map-hue-5: #6aa878;
+  --map-hue-6: #d4696a;
+  --map-hue-7: #c19730;
+  --map-hue-8: #4c81c4;
+  --map-hue-9: #2fa79c;
+  --map-hue-10: #c47a45;
+  --map-hue-11: #8b98a8;
+  --map-hue-12: #9970d1;
+  --map-hue-13: #94a84e;
+  --map-hue-14: #c0698d;
+  --color-map-neutral: #33403d;
+  --color-search-glow: #f0c94a;
   color-scheme: dark;
 }
 

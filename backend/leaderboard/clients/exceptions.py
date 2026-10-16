@@ -65,6 +65,19 @@ class EmptyResponseError(SourceError):
     code = "empty_response"
 
 
+class PayloadTooLargeError(SourceError):
+    """A response exceeded the byte ceiling for this source.
+
+    Raised from `Content-Length` *before* the body is read, so a hostile or
+    merely enormous response is refused rather than downloaded and then
+    refused. Hacker News comment trees are the case that needs it: a
+    thousand-comment thread is megabytes of JSON, and a run that pulls fifteen of
+    them has spent its whole budget on one thread.
+    """
+
+    code = "payload_too_large"
+
+
 class PaginationGuardError(SourceError):
     """The provider kept reporting `has_more` past our hard page ceiling."""
 

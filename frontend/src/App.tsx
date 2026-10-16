@@ -5,6 +5,9 @@ import { AppShell } from './app/AppShell'
 import { ArtificialAnalysisPage } from './features/artificial-analysis/ArtificialAnalysisPage'
 import { CategoriesPage } from './features/categories/CategoriesPage'
 import { DataQualityPage } from './features/data-quality/DataQualityPage'
+import { DiscussionDetailPage } from './features/discussions/DiscussionDetailPage'
+import { DiscussionMapPage } from './features/discussions/DiscussionMapPage'
+import { DiscussionsPage } from './features/discussions/DiscussionsPage'
 import { HomePage } from './features/home/HomePage'
 import { InterimCheckInPage } from './features/interim/InterimCheckInPage'
 import { ModelDetailPage } from './features/models/ModelDetailPage'
@@ -57,6 +60,16 @@ function App() {
         <Route path="artificial-analysis" element={<ArtificialAnalysisPage />} />
         <Route path="models/:key" element={<ModelDetailPage />} />
         <Route path="data-quality" element={<DataQualityPage />} />
+        <Route path="discussions" element={<DiscussionsPage />} />
+        {/*
+          Before `discussions/:hnId`, and that ordering is load-bearing rather
+          than cosmetic: React Router ranks a static segment above a dynamic one
+          so this resolves either way, but the day that ranking changes, `map`
+          would silently become a thread id and the page would 404. A test pins
+          the behaviour.
+        */}
+        <Route path="discussions/map" element={<DiscussionMapPage />} />
+        <Route path="discussions/:hnId" element={<DiscussionDetailPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>

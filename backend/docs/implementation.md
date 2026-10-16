@@ -22,7 +22,7 @@ tasks → services → clients + validation + matching + persistence → models
 
 | Module | Responsibility |
 |---|---|
-| `models.py` | 7 models. Latest-only: one current row per entity, upserted per refresh. |
+| `models.py` | 12 models. Latest-only: one current row per entity, upserted per refresh. The five Hacker News tables are the one exception to "latest-only" in spirit -- see [discussions](#hacker-news-discussions). |
 | `constants.py` | `TextChoices` enums, ordering whitelists, category→metric-kind map. |
 | `normalization.py` | `normalize_model_key()`, `harness_fold()`. |
 | `matching.py` | The deterministic match ladder — pure, no DB access except an injected alias table. |
@@ -32,8 +32,16 @@ tasks → services → clients + validation + matching + persistence → models
 | `services/refresh.py` | Orchestration and transaction boundaries. `refresh_all` / `refresh_lmarena` / `refresh_aa`. |
 | `locking.py` | Redis-backed non-blocking `run_lock()` (compare-and-delete on a token). |
 | `tasks.py` | Thin `@shared_task` wrappers only — no logic. |
-| `api/` | `urls`, `pagination`, `params`, `errors`, `selectors`, `serializers`, `views`. |
-| `management/commands/` | `refresh_leaderboard`, `report_unmatched`. |
+| `api/` | `urls`, `pagination`, `params`, `errors`, `selectors`, `serializers`, `views`, plus the `discussion_*` trio. |
+| `hn_vocabulary.py` | The seeded provider/service vocabulary, applied by migration `0009`. |
+| `hn_text.py` | The HTML sanitizer for HN comment bodies. A security boundary with its own test file. |
+| `hn_parsing.py` | Algolia payload -> dataclasses. Pure. |
+| `hn_matching.py` | The exact free-text matcher: `word`, `token_run`, `token_prefix`. Pure. |
+| `clients/hackernews.py` | Discovery and comment-tree reads, with the size and pagination-ceiling guards. |
+| `services/discussions.py` | HN orchestration and transaction boundaries. |
+| `services/runbook.py` | Run bookkeeping shared by both services -- `skipped`, `claim_run`, `counters`. |
+| `api/discussion_*` | The three discussion endpoints, split by role like the rest of `api/`. |
+| `management/commands/` | `refresh_leaderboard`, `refresh_if_stale`, `report_unmatched`, `refresh_discussions`. |
 
 The single most important property of the request path is what it **cannot**
 reach: `api/` imports no client, no transport and no `datasets`. A request cannot
@@ -207,6 +215,70 @@ holds even if the cache is unavailable. `reap_stale_running()` fails `running`
 rows older than 6 h so a SIGKILLed worker cannot strand one and block every
 future refresh.
 
+### The hourly discussion refresh
+
+`CELERY_BEAT_SCHEDULE` gains a second entry, registered only when
+`LEADERBOARD_HN_ENABLED` is true:
+
+```python
+"leaderboard-refresh-discussions-hourly": {
+    "task": "leaderboard.refresh_discussions",
+    "schedule": crontab(minute=15),      # :15, not :00
+    "options": {"expires": 1800},
+}
+```
+
+`:15` rather than `:00` because the model refresh fires at minute 0, and two
+writers on one SQLite file is worth a 15-minute offset. An *hourly* crontab is
+unaffected by `CELERY_TIMEZONE`'s +8 offset — every minute value maps to the same
+minute in any whole-hour zone — so unlike the daily `"8,20"` this needs no
+conversion. `expires` is half the interval: a stale hourly run is worse than a
+skipped one.
+
+**The setting is not sufficient on its own**, and this is worth knowing before
+disabling it: `DatabaseScheduler` treats its `PeriodicTask` rows as authoritative,
+so turning `LEADERBOARD_HN_ENABLED` off removes the entry from code but leaves any
+existing row behind and beat keeps firing the task. `tasks.refresh_discussions`
+therefore short-circuits on the same setting, returning a `skipped` run. Belt and
+braces, because the failure mode -- a "disabled" feature quietly spending requests
+every hour -- is invisible.
+
+Steady state costs ~65-80 requests/hour against a documented allowance of 10,000:
+a handful of window-slice queries, the budgeted keyword sweep, and up to
+`LEADERBOARD_HN_MAX_TREES_PER_RUN` comment trees. A tree is the expensive part of
+that (~4 s and a few hundred kilobytes), which is why the tree-fetch phase also
+carries a wall-clock budget -- whatever it does not reach is deferred and reported
+rather than allowed to overrun the interval.
+
+The tree budget is sized for the **cold start**, and that is the number that moved
+first in practice: discovery finds several hundred LLM-related threads in its first
+pass over a retention window, while a settled hour adds only tens. A budget near
+the steady-state rate would therefore leave the initial backlog pending for days,
+which reads in the UI as "no comments stored yet" on nearly every row. At the
+measured ~4 s per tree, 60 trees costs about four minutes of the 600 s budget,
+leaving the wall-clock ceiling to guard the upper end.
+
+### Hacker News discussions
+
+The one source whose rows are **deleted** rather than deactivated, and the only
+one that is not latest-only. `docs/data-sources.md` §7 has the full argument; the
+short version is that a Hacker News thread stays fetchable upstream forever, so an
+aged-out row is a re-fetchable cache entry rather than the last copy of a
+measurement — which makes age-based pruning safe, and age-based pruning is what
+lets membership be monotonic (nothing can re-enter the window), which in turn
+removes the need for an `is_active` flag, a hysteresis counter and a stored
+`is_top`.
+
+`ProviderAlias.alias_key` is **globally unique**, not unique per entity: two
+entities claiming one spelling would make every resulting tag ambiguous, so the
+database refuses the insert rather than the matcher picking a winner. That is the
+"never guess" rule expressed where an admin form cannot bypass it.
+
+Title tags are rebuilt every run; comment tags only when the tree was refetched.
+The asymmetry is a deliberate cost trade, and its consequence — a *comment* alias
+change needs `--skip-discovery` — is documented at the writer and in the command's
+help text.
+
 ### The schedule presumes a machine that is always on
 
 Which a development machine is not. With only `runserver` up, nothing refreshes
@@ -312,7 +384,7 @@ argument).
 
 ## Testing
 
-**300 tests, ~3 s.** Run with `uv run pytest`.
+**~990 tests, ~7 s.** Run with `uv run pytest`.
 
 The governing rule is **inject at our own seams, never at a library boundary**:
 
@@ -491,6 +563,25 @@ are inert — no model, no migration and no code path refers to them.
   the last good data with `is_stale: true`.
 - **A match can regress** if AA renames slugs or changes effort naming. The
   unmatched report and the `ModelAlias` table are the recovery path.
+- **A discussion's comment tags are rebuilt only when its tree is refetched.** A
+  change to a comment-level alias therefore reaches an existing thread through
+  `refresh_discussions --skip-discovery`, or automatically once that thread's
+  comment count moves. Title tags are always current. Rebuilding every stored
+  thread's comment tags hourly was rejected as too expensive for the benefit: it
+  means loading a few hundred thousand comment rows into memory to redo work that
+  has not changed.
+- **A stored thread must clear the sweep floor or it is pruned.** That includes a
+  thread whose `num_comments` Hacker News stops reporting, since it cannot then be
+  shown to clear the bar. The floors are the retention policy rather than a
+  discovery-only rule, which is deliberate -- and means raising them is
+  retroactive. `--dry-run` reports `threads_below_floor` first.
+- **Relevance terms are not filterable.** `relevance_terms` is a `JSONField` and
+  Django's `contains` lookup is unsupported on SQLite. The terms are served on each
+  row for display; filtering on them would need a join table, which is more
+  machinery than a filter nobody asked for earns.
+- **A discussion's `children_count` counts *stored* children**, so a node whose
+  replies were cut by the ingest cap reports zero. `tree_truncated` on the thread
+  is what distinguishes that from a node nobody replied to.
 - **The battle-count heatmap from the proposal is out of scope**: the leaderboard
   dataset does not publish pairwise comparison counts.
 - **The joined surface is intentionally the smallest of the three.** `/overview/`

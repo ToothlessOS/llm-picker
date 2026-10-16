@@ -25,7 +25,7 @@ import socket
 
 import pytest
 
-from leaderboard.tests.test_api import BASE, seed
+from leaderboard.tests.test_api import BASE, seed, seed_discussions
 
 
 @pytest.fixture
@@ -46,6 +46,9 @@ def sealed(monkeypatch, db):
       failure message names the offending code rather than a socket call.
     * the LMArena loader, which is the only thing in the project that imports
       `datasets`, and it does so lazily and inside this callable.
+    * the Hacker News transport factory, which exists for this reason -- a named
+      function rather than an inline `RequestsTransport()`, so this fixture can
+      replace one seam and see a failure naming our code.
     """
 
     def explode(*args, **kwargs):
@@ -54,12 +57,14 @@ def sealed(monkeypatch, db):
             "never leave the database"
         )
 
+    import leaderboard.clients.hackernews as hackernews
     import leaderboard.clients.http as http
     import leaderboard.clients.lmarena as lmarena
 
     monkeypatch.setattr(socket.socket, "connect", explode)
     monkeypatch.setattr(http.RequestsTransport, "get", explode, raising=False)
     monkeypatch.setattr(lmarena, "_default_loader", explode)
+    monkeypatch.setattr(hackernews, "_default_transport", explode)
     return explode
 
 
@@ -74,6 +79,11 @@ ENDPOINTS = [
     "/models/claude-opus-5-high/",
     "/metadata/",
     "/unmatched/",
+    "/discussions/",
+    "/discussions/?entity=anthropic",
+    "/discussions/?search=a",
+    "/discussions/entities/",
+    "/discussions/{hn_id}/",
 ]
 
 
@@ -81,6 +91,8 @@ class TestNoNetwork:
     @pytest.mark.parametrize("path", ENDPOINTS)
     def test_every_endpoint_answers_with_the_network_sealed(self, client, sealed, path):
         seed()
+        discussions = seed_discussions()
+        path = path.format(hn_id=discussions["hn_id"])
 
         response = client.get(f"{BASE}{path}")
 
@@ -91,10 +103,27 @@ class TestNoNetwork:
         """The stronger form: a handler that swallowed the exception and returned
         an empty payload would satisfy a status-code check while being useless."""
         seed()
+        discussions = seed_discussions()
+        path = path.format(hn_id=discussions["hn_id"])
 
         body = client.get(f"{BASE}{path}").json()
 
         assert body, f"{path} returned an empty body"
+
+    def test_the_discussion_views_reach_no_matcher(self, client, sealed):
+        """The same seal, against a *populated* bank.
+
+        An empty bank answers the discussion endpoints without ever joining a tag
+        or reading a comment, so the parametrized cases above would pass even if a
+        view matched entities at request time. A seeded bank exercises the join,
+        which is where an eager inference would live.
+        """
+        discussions = seed_discussions()
+
+        body = client.get(f"{BASE}/discussions/{discussions['hn_id']}/").json()
+
+        assert body["comments"]
+        assert body["thread"]["entities"]
 
     def test_the_configuration_report_does_not_probe_the_source(self, client, sealed):
         """`configured` is read from the environment.
@@ -121,6 +150,9 @@ class TestNoNetwork:
         kind: importing it does not merely risk a call, it makes every web worker
         pay a multi-second import to serve requests that never needed it.
         """
+        import leaderboard.api.discussion_selectors as discussion_selectors
+        import leaderboard.api.discussion_serializers as discussion_serializers
+        import leaderboard.api.discussion_views as discussion_views
         import leaderboard.api.errors as errors
         import leaderboard.api.pagination as pagination
         import leaderboard.api.params as params
@@ -134,7 +166,14 @@ class TestNoNetwork:
             "clients.http",
             "clients.artificial_analysis",
             "clients.lmarena",
+            "clients.hackernews",
             "services.refresh",
+            "services.discussions",
+            # The ingest-side matcher and sanitizer. A tag is a *stored row*, so
+            # matching at request time would be a second source of truth for what
+            # the tags say as well as a per-request cost.
+            "hn_matching",
+            "hn_text",
             "locking",
             "import datasets",
         )
@@ -147,6 +186,9 @@ class TestNoNetwork:
             pagination,
             throttling,
             urls,
+            discussion_views,
+            discussion_selectors,
+            discussion_serializers,
         ):
             with open(module.__file__) as handle:
                 text = handle.read()

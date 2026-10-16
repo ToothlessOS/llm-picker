@@ -402,6 +402,28 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# The Hacker News refresh is registered only when enabled, so a deployment that
+# does not want it never materialises the `PeriodicTask` row.
+#
+# The gate is NOT sufficient on its own: `DatabaseScheduler` makes the database
+# authoritative, so removing the entry here leaves any existing row behind and the
+# task keeps firing. `tasks.refresh_discussions` therefore also short-circuits on
+# the same setting, which is the layer that actually stops it.
+if env_bool("LEADERBOARD_HN_ENABLED", True):
+    CELERY_BEAT_SCHEDULE["leaderboard-refresh-discussions-hourly"] = {
+        "task": "leaderboard.refresh_discussions",
+        # :15 rather than :00. The twice-daily model refresh fires at minute 0, and
+        # two writers on one SQLite file is worth a 15-minute offset. An *hourly*
+        # crontab is unaffected by CELERY_TIMEZONE's +8 offset -- every minute
+        # value maps to the same minute in every whole-hour zone -- so unlike the
+        # daily "8,20" above, this needs no conversion.
+        "schedule": crontab(minute=15),
+        "options": {
+            # Half the interval: a stale hourly run is worse than a skipped one.
+            "expires": 1800,
+        },
+    }
+
 
 # --------------------------------------------------------------------------- #
 # Leaderboard ingestion
@@ -441,6 +463,128 @@ LEADERBOARD_STARTUP_REFRESH_COOLDOWN_SECONDS = env_int(
 LEADERBOARD_LMARENA_DATASET = env(
     "LEADERBOARD_LMARENA_DATASET", "lmarena-ai/leaderboard-dataset"
 )
+
+
+# --------------------------------------------------------------------------- #
+# Hacker News discussions
+# --------------------------------------------------------------------------- #
+#
+# Every default here is duplicated in `leaderboard/constants.py` as a
+# `DEFAULT_HN_*` value, because that module must be importable *without* settings
+# configured -- `api/` reads these through `constants.hn_config()` on the request
+# path. `test_hn_settings.py` asserts the two sets agree, so the duplication
+# cannot drift silently.
+#
+# There is no API key: the Algolia search API is open. So unlike Artificial
+# Analysis there is no `configured: false` state to report, and nothing here is a
+# secret.
+
+#: Master switch. Also short-circuits inside the task, because
+#: `django-celery-beat`'s `DatabaseScheduler` keeps an existing `PeriodicTask` row
+#: alive after this setting removes the schedule entry from code.
+LEADERBOARD_HN_ENABLED = env_bool("LEADERBOARD_HN_ENABLED", True)
+
+LEADERBOARD_HN_BASE_URL = env("LEADERBOARD_HN_BASE_URL", "https://hn.algolia.com/api/v1")
+
+#: How long a thread stays in the bank. Threads older than this are **deleted**
+#: (with their comments and tags) -- the one place this app DELETEs a source
+#: table, justified in `docs/data-sources.md`: a Hacker News thread stays
+#: fetchable upstream forever, so our row is a cache entry rather than the last
+#: copy of a measurement.
+LEADERBOARD_HN_WINDOW_DAYS = env_int("LEADERBOARD_HN_WINDOW_DAYS", 14)
+
+#: The window is queried in slices this wide. Algolia cannot page past 1,000
+#: results and returns a *plausible truncated* set beyond it, so one query per
+#: fortnight would silently lose its oldest days.
+LEADERBOARD_HN_WINDOW_SLICE_DAYS = env_int("LEADERBOARD_HN_WINDOW_SLICE_DAYS", 7)
+
+#: The floor a story must clear to be considered at all. Applied server-side
+#: through `numericFilters`, which is what makes a window cost a handful of
+#: requests rather than one per story.
+LEADERBOARD_HN_MIN_POINTS = env_int("LEADERBOARD_HN_MIN_POINTS", 100)
+LEADERBOARD_HN_MIN_COMMENTS = env_int("LEADERBOARD_HN_MIN_COMMENTS", 20)
+
+#: The floor a *keyword-swept* story must clear, deliberately lower than the
+#: window's above.
+#:
+#: Two different questions, which is why they are two settings. The window floor
+#: is "is this one of the notable stories of the period?"; the sweep floor is "is
+#: this a real discussion rather than trivia?" -- the sweep exists precisely to
+#: reach a relevant thread *below* the top-story bar, so reusing that bar would
+#: make the sweep find nothing the window had not already found.
+#:
+#: This is also the bar a thread must clear to **remain** in the bank: the hourly
+#: prune removes anything below it, so the floors stay the retention policy rather
+#: than a rule applied only once at discovery. Raising them is therefore
+#: retroactive -- deliberately, and announced by the run's `threads_below_floor`
+#: counter, which `--dry-run` shows before anything is deleted.
+LEADERBOARD_HN_SWEEP_MIN_POINTS = env_int("LEADERBOARD_HN_SWEEP_MIN_POINTS", 30)
+LEADERBOARD_HN_SWEEP_MIN_COMMENTS = env_int("LEADERBOARD_HN_SWEEP_MIN_COMMENTS", 5)
+
+#: `rank_score = points + weight * num_comments`. A comment is evidence of
+#: engagement, which is this feature's entire subject.
+LEADERBOARD_HN_COMMENT_WEIGHT = float(env("LEADERBOARD_HN_COMMENT_WEIGHT", "1.0"))
+
+#: Trees fetched per run. A tree is a request of several hundred kilobytes, so
+#: this plus the wall-clock budget is what keeps an hourly job inside its hour.
+#:
+#: 60 rather than a smaller number because of the *cold start*: discovery finds
+#: several hundred LLM-related threads in the first pass of a retention window,
+#: while a steady-state hour adds only tens. A budget near the steady-state rate
+#: would leave the initial backlog pending for days -- visible in the UI as "no
+#: comments stored yet" on most rows. At the measured ~4s per tree, 60 costs about
+#: four minutes against the 600s run budget, so the headroom is large.
+LEADERBOARD_HN_MAX_TREES_PER_RUN = env_int("LEADERBOARD_HN_MAX_TREES_PER_RUN", 60)
+
+#: Keyword sweeps per run. Terms are swept round-robin, so cost stays constant
+#: per hour however large the vocabulary grows.
+LEADERBOARD_HN_KEYWORD_QUERY_BUDGET = env_int("LEADERBOARD_HN_KEYWORD_QUERY_BUDGET", 8)
+
+#: Search pagination. `hits_per_page * max_page` must stay under Algolia's 1,000
+#: result ceiling; `checks.py` asserts the arithmetic at boot.
+LEADERBOARD_HN_HITS_PER_PAGE = env_int("LEADERBOARD_HN_HITS_PER_PAGE", 100)
+LEADERBOARD_HN_MAX_PAGE = env_int("LEADERBOARD_HN_MAX_PAGE", 9)
+
+#: Refuse a thread above this many comments before spending a request on it, and
+#: store at most `MAX_STORED_COMMENTS` of any tree that is fetched. Two numbers
+#: rather than one because they answer different questions: the first is "is this
+#: worth a request", the second "how much do we keep".
+#:
+#: The stored cap is what actually binds, and the two must stay in that order --
+#: `checks.py` asserts it. A refusal below the cap would make the cap unreachable;
+#: a refusal *far* above it only widens the range of threads fetched and then cut
+#: down to size. Note the gap between them is what decides the largest discussion
+#: that can be shown at all: a thread above the refusal stores no comments, so it
+#: reads as "not fetched yet" even though every run will skip it.
+LEADERBOARD_HN_MAX_COMMENTS = env_int("LEADERBOARD_HN_MAX_COMMENTS", 3000)
+LEADERBOARD_HN_MAX_STORED_COMMENTS = env_int("LEADERBOARD_HN_MAX_STORED_COMMENTS", 2500)
+
+#: Byte ceiling on a response, checked from `Content-Length` before the body is
+#: read. A response without that header cannot be checked here, which is why the
+#: comment cap above exists as a second guard.
+LEADERBOARD_HN_MAX_ITEM_BYTES = env_int("LEADERBOARD_HN_MAX_ITEM_BYTES", 8_000_000)
+
+#: Comment trees are far larger than search responses, so they get their own
+#: timeout rather than sharing the 30s the search path uses.
+LEADERBOARD_HN_TREE_TIMEOUT_SECONDS = float(
+    env("LEADERBOARD_HN_TREE_TIMEOUT_SECONDS", "45.0")
+)
+
+#: Wall-clock ceiling on the tree-fetch phase. Whatever it does not reach is
+#: deferred to the next hour and reported, because an hourly job that overran its
+#: own interval would collide with itself.
+LEADERBOARD_HN_RUN_BUDGET_SECONDS = env_int("LEADERBOARD_HN_RUN_BUDGET_SECONDS", 600)
+
+#: A 429 with a `Retry-After` longer than this fails the run rather than sleeping
+#: through it inside a worker.
+LEADERBOARD_HN_MAX_INLINE_RETRY_AFTER_SECONDS = env_int(
+    "LEADERBOARD_HN_MAX_INLINE_RETRY_AFTER_SECONDS", 60
+)
+
+#: Staleness for `meta.discussions`. The job runs hourly, so two hours tolerates
+#: one missed run. Deliberately not folded into `meta.sources`, which describes
+#: the model rows a response carries.
+LEADERBOARD_HN_STALE_AFTER_SECONDS = env_int("LEADERBOARD_HN_STALE_AFTER_SECONDS", 2 * 3600)
 
 LOGGING = {
     "version": 1,
