@@ -125,37 +125,111 @@ export function ModelCardArt() {
 }
 
 const FRONTIER = [
-  [48, 232],
-  [150, 168],
-  [275, 112],
-  [420, 74],
-  [575, 42],
+  [42, 218],
+  [100, 174],
+  [168, 130],
+  [252, 92],
+  [356, 60],
 ] as const
 
 const BELOW = [
-  [125, 214],
-  [220, 192],
-  [330, 224],
-  [445, 170],
-  [545, 136],
-  [650, 152],
+  [76, 212],
+  [132, 196],
+  [196, 220],
+  [244, 174],
+  [306, 142],
+  [372, 158],
+] as const
+
+const PARALLEL_X = [446, 518, 590, 662] as const
+
+const PARALLEL_RECORDS = [
+  [208, 140, 174, 126],
+  [190, 104, 154, 166],
+  [168, 178, 132, 196],
+  [146, 122, 92, 142],
+  [118, 82, 116, 76],
+  [96, 154, 70, 108],
+  [72, 58, 86, 54],
+  [52, 92, 48, 88],
+] as const
+
+const PARALLEL_HIGHLIGHTS = [
+  [190, 104, 154, 166],
+  [72, 58, 86, 54],
 ] as const
 
 export function ExplorerArt() {
   const front = FRONTIER.map(([x, y], index) => `${index === 0 ? 'M' : 'L'}${x},${y}`).join(' ')
+  const parallelPoints = (values: readonly number[]) =>
+    values.map((y, index) => `${PARALLEL_X[index]},${y}`).join(' ')
   return (
-    <svg className="home-art home-art--explorer" viewBox="0 0 700 270" role="img" aria-label="Cost against capability, with the frontier marked">
-      {[58, 128, 198].map((y) => (
-        <line key={y} x1="28" x2="684" y1={y} y2={y} stroke="var(--home-art-grid)" />
+    <svg
+      className="home-art home-art--explorer"
+      viewBox="0 0 700 270"
+      role="img"
+      aria-label="Cost against capability scatterplot with Pareto frontier and parallel coordinates"
+    >
+      <text x="28" y="18" fill="var(--home-art-label)" fontSize="11" fontFamily="DM Sans, sans-serif">
+        Performance vs. cost
+      </text>
+      {[72, 132, 192].map((y) => (
+        <line key={y} x1="28" x2="394" y1={y} y2={y} stroke="var(--home-art-grid)" />
       ))}
-      <line x1="28" x2="28" y1="24" y2="252" stroke="var(--home-art-grid)" />
-      <line x1="28" x2="684" y1="252" y2="252" stroke="var(--home-art-grid)" />
+      <line x1="28" x2="28" y1="34" y2="232" stroke="var(--home-art-grid)" />
+      <line x1="28" x2="394" y1="232" y2="232" stroke="var(--home-art-grid)" />
       <path d={front} fill="none" stroke="var(--home-art-teal)" strokeWidth="2" strokeDasharray="7 6" strokeLinecap="round" strokeLinejoin="round" />
       {BELOW.map(([x, y], index) => (
-        <circle key={index} cx={x} cy={y} r="7" fill="var(--home-art-muted)" />
+        <circle key={index} cx={x} cy={y} r="5.5" fill="var(--home-art-muted)" />
       ))}
       {FRONTIER.map(([x, y], index) => (
-        <circle key={index} cx={x} cy={y} r="8" fill="var(--home-art-teal)" />
+        <circle key={index} cx={x} cy={y} r="6.5" fill="var(--home-art-teal)" />
+      ))}
+      <text x="211" y="258" fill="var(--home-art-label)" fontSize="11" textAnchor="middle" fontFamily="DM Sans, sans-serif">
+        Cost
+      </text>
+
+      <line x1="414" x2="414" y1="24" y2="244" stroke="var(--home-art-grid)" />
+      <text x="440" y="18" fill="var(--home-art-label)" fontSize="11" fontFamily="DM Sans, sans-serif">
+        Parallel coordinates
+      </text>
+      {PARALLEL_X.map((x, index) => (
+        <g key={x}>
+          <line x1={x} x2={x} y1="34" y2="232" stroke="var(--home-art-grid)" />
+          <text
+            x={x}
+            y="258"
+            fill="var(--home-art-label)"
+            fontSize="10"
+            textAnchor="middle"
+            fontFamily="DM Sans, sans-serif"
+          >
+            {['Cost', 'Intel', 'Coding', 'Agent'][index]}
+          </text>
+        </g>
+      ))}
+      {PARALLEL_RECORDS.map((values, index) => (
+        <polyline
+          key={index}
+          points={parallelPoints(values)}
+          fill="none"
+          stroke="var(--home-art-muted)"
+          strokeWidth="1.25"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity="0.42"
+        />
+      ))}
+      {PARALLEL_HIGHLIGHTS.map((values, index) => (
+        <polyline
+          key={index}
+          points={parallelPoints(values)}
+          fill="none"
+          stroke="var(--home-art-teal)"
+          strokeWidth="2.25"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       ))}
     </svg>
   )
