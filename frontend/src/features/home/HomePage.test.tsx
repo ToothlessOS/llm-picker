@@ -53,6 +53,9 @@ describe('HomePage', () => {
       screen.getByRole('heading', { name: /Find the right model/ }),
     ).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Performance explorer' })).toBeTruthy()
+    expect(
+      screen.getByRole('img', { name: /scatterplot with Pareto frontier and parallel coordinates/i }),
+    ).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Cost Breakdown' })).toBeTruthy()
     expect(screen.getByText('Where does the money go?')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Task Fit' })).toBeTruthy()

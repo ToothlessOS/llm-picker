@@ -1,0 +1,542 @@
+
+% LLM Picker | STATS 401 Final Poster
+% A1 portrait: 594 x 841 mm
+% Compile using pdfLaTeX
+% Required images: 1.png, 2.1.png, 2.2.png, 3.png, 4.png, 5.png, 6.png
+
+\documentclass[
+  17pt,
+  a1paper,
+  portrait
+]{tikzposter}
+
+% ===================================
+% Packages and page size
+% ===================================
+
+\usepackage{geometry}
+\geometry{
+  paperwidth=594mm,
+  paperheight=841mm,
+  margin=0mm
+}
+
+\usepackage[T1]{fontenc}
+\usepackage{tgtermes}
+\renewcommand{\familydefault}{\rmdefault}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{ragged2e}
+\usepackage{fontawesome5}
+\usepackage[hidelinks]{hyperref}
+\usepackage{etoolbox}
+
+\tikzposterlatexaffectionproofoff
+\usetikzlibrary{
+  shapes.geometric,
+  arrows.meta,
+  positioning
+}
+
+% ===================================
+% Colors and theme
+% ===================================
+
+\definecolor{MyOrange}{rgb}{0.8,0.33,0}
+\definecolor{MyBrown}{rgb}{0.28,0.20,0.20}
+\definecolor{MyGreen}{rgb}{0.33,0.42,0.18}
+
+\usetheme{Default}
+
+\definecolorstyle{MyStyle2016}{
+  \definecolor{ColorOne}{named}{MyBrown}
+  \definecolor{ColorTwo}{named}{MyOrange}
+  \definecolor{ColorThree}{named}{MyGreen}
+}{
+  \colorlet{titlebgcolor}{ColorOne}
+  \colorlet{titlefgcolor}{white}
+  \colorlet{backgroundcolor}{ColorOne!15}
+  \colorlet{framecolor}{ColorOne}
+  \colorlet{blocktitlebgcolor}{white}
+  \colorlet{blocktitlefgcolor}{ColorTwo}
+  \colorlet{blockbodybgcolor}{white}
+  \colorlet{blockbodyfgcolor}{black}
+  \colorlet{innerblocktitlebgcolor}{ColorOne!15}
+  \colorlet{innerblocktitlefgcolor}{black}
+  \colorlet{innerblockbodybgcolor}{ColorOne!15}
+  \colorlet{innerblockbodyfgcolor}{black}
+  \colorlet{notebgcolor}{ColorTwo!20}
+  \colorlet{notefgcolor}{ColorTwo}
+  \colorlet{notefrcolor}{ColorTwo}
+}
+
+\usecolorstyle{MyStyle2016}
+
+\useblockstyle[
+  titleinnersep=0.42cm,
+  bodyinnersep=0.40cm,
+  linewidth=0pt
+]{Default}
+
+\colorlet{titlebgcolor}{MyBrown}
+\colorlet{titlefgcolor}{white}
+\colorlet{framecolor}{MyBrown}
+
+\usetitlestyle{Default}
+\setlength{\leftmargini}{1.1em}
+
+% Compact poster spacing
+\makeatletter
+\TP@blockverticalspace=4mm
+\TP@colspace=12mm
+\TP@subcolspace=0mm
+\TP@innermargin=20mm
+\makeatother
+
+% ===================================
+% Reusable commands
+% ===================================
+
+\newcommand{\tightitems}{
+  \setlength{\itemsep}{0.18em}
+  \setlength{\parsep}{0pt}
+  \setlength{\parskip}{0pt}
+  \setlength{\topsep}{0.1em}
+}
+
+% Screenshot command
+% #1 = filename
+% #2 = maximum image height
+% Keep the original aspect ratio; never crop the image.
+
+\newcommand{\postershot}[2]{%
+  \par\vspace{0.12em}%
+  \begin{center}%
+    \IfFileExists{#1}{%
+      \begingroup
+      \setlength{\fboxsep}{2pt}%
+      \fcolorbox{MyBrown!18}{white}{%
+        \includegraphics[
+          width=0.98\linewidth,
+          height=#2,
+          keepaspectratio
+        ]{#1}%
+      }%
+      \endgroup
+    }{%
+      \fcolorbox{MyBrown!18}{white}{%
+        \parbox[c][#2][c]{0.90\linewidth}{%
+          \centering
+          \color{MyBrown!65}
+          Image not found: \texttt{#1}%
+        }%
+      }%
+    }%
+  \end{center}%
+  \vspace{0.10em}%
+}
+
+% Orange block headings
+
+\newcommand{\posterblock}[2]{%
+  \block[titleleft,roundedcorners=16]
+  {\color{MyOrange}#1}
+  {\raggedright #2}
+}
+
+% ===================================
+% Title
+% ===================================
+
+\title{
+  {\fontsize{65}{70}\selectfont\bfseries\upshape LLM Picker}
+}
+
+\author{
+  Siyuan Cao \qquad
+  Ziyue Zhang \qquad
+  Haoyuan Zheng
+}
+
+\institute{STATS 401 Final Project}
+
+\makeatletter
+\patchcmd{\TP@maketitle}
+  {\vspace*{1em}}
+  {\vspace*{0.15em}}
+  {}{}
+\makeatother
+
+% ===================================
+% Document
+% ===================================
+
+\begin{document}
+
+\maketitle[
+  width=0.96\linewidth,
+  titletoblockverticalspace=20pt,
+  linewidth=0,
+  roundedcorners=10
+]
+
+\begin{columns}
+
+% ===================================
+% LEFT COLUMN
+% ===================================
+
+\column{0.33}
+
+% Introduction
+
+\posterblock{Introduction}{
+  LLMs differ in capability, price, speed, and task
+  specialization. Benchmark leaders are not always
+  the best choice for a user's budget or workflow.
+
+  \vspace{0.20em}
+  \textbf{LLM Picker} combines performance data,
+  task rankings, and community discussion to make
+  model trade-offs visible.
+}
+
+% Research questions
+
+\posterblock{Research Questions}{
+  \begin{itemize}\tightitems
+    \item Which models offer the best
+      \textbf{capability--cost and capability--speed}
+      trade-offs?
+
+    \item Which models best fit Agent, Document,
+      Search, or WebDev tasks, at what cost?
+
+    \item What additional context comes from
+      real community discussions?
+  \end{itemize}
+}
+
+% Datasets
+
+\posterblock{Datasets}{
+  \begin{itemize}\tightitems
+    \item \textbf{Artificial Analysis:}
+      Intelligence, Coding, and Agentic indices;
+      token prices, task cost, and inference speed.
+
+    \item \textbf{LMArena:}
+      Agent, Document, Search, and WebDev
+      leaderboards and ratings.
+
+    \item \textbf{Hacker News / Algolia:}
+      recent stories, hierarchical comments,
+      and reviewed provider/model mentions.
+  \end{itemize}
+}
+
+% Methods and implementation
+
+\posterblock{Methods and Implementation}{
+  \begin{itemize}\tightitems
+
+    \item \textbf{Data ingestion:}
+      Fetch paginated AA v2 API data,
+      latest LMArena task leaderboards from
+      Hugging Face, and Hacker News stories
+      with nested comments via Algolia.
+
+    \item \textbf{Cleaning and matching:}
+      Use AA UUIDs for identity;
+      normalize model names with NFKC
+      and reviewed aliases.
+      Preserve reasoning variants,
+      remove duplicate rankings,
+      and treat missing measurements
+      as \texttt{NULL}.
+
+    \item \textbf{Derived measures:}
+      Find Pareto-efficient models for
+      capability against cost or speed.
+      Compute per-task ranks,
+      model-card percentiles,
+      and stacked task-cost components
+      proportional to published token prices.
+
+    \item \textbf{Visualization and interaction:}
+      D3/SVG renders scatterplots,
+      parallel axes, rank charts, bars,
+      heatmaps, radar profiles,
+      and comment trees.
+      Linked brushing, filters, sorting,
+      and three-model pinning
+      support comparison.
+
+    \item \textbf{Architecture and QA:}
+      React manages linked views;
+      Django REST/SQLite serves
+      data and provenance.
+      Celery Beat/Redis updates
+      benchmarks twice daily and
+      discussions hourly,
+      with automated pipeline tests.
+
+  \end{itemize}
+}
+
+% Home Page screenshot
+
+\posterblock{Home Page}{
+  \postershot{1.png}{7cm}
+}
+
+% ===================================
+% CENTER COLUMN
+% ===================================
+
+\column{0.34}
+
+% 1. Performance Explorer
+% Enlarged screenshots; original aspect ratio preserved
+
+\posterblock{1. Performance Explorer}{
+  \postershot{2.1.png}{7.8cm}
+  \vspace{-0.25em}
+  \postershot{2.2.png}{7.8cm}
+
+  \begin{itemize}\tightitems
+    \item Scatterplot: model performance
+      vs. cost or speed; dashed lines show
+      the \textbf{Pareto frontier}.
+
+    \item Choose Intelligence, Coding,
+      or Agentic performance, switch axis
+      measures, and filter providers.
+
+    \item Brush and pin models to connect
+      the scatterplot, parallel coordinates,
+      and rank comparisons.
+  \end{itemize}
+}
+
+% 2. Cost per Task
+
+\posterblock{2. Cost per Task}{
+  \postershot{3.png}{6.3cm}
+
+  A sorted stacked bar chart compares
+  Artificial Analysis's estimated USD
+  cost per Intelligence Index task.
+
+  Segments explain the relative list-price
+  contributions of input, output, cache write,
+  and cache hit; a \textbf{median line}
+  highlights expensive outliers.
+
+  The reported task costs range from about
+  \$0.05 to \$5.86, with a median near \$1.03.
+}
+
+% 3. Task Fit
+
+\posterblock{3. Task Fit}{
+  \postershot{4.png}{6.3cm}
+
+  A model-by-task \textbf{rank heatmap}
+  compares Agent, Document, Search, and WebDev.
+
+  Darker teal indicates a stronger
+  within-task ranking. Sorting and tooltips
+  support close comparisons, while blank cells
+  explicitly mean \textbf{not evaluated}.
+
+  Coverage in the reported cohort:
+  Agent 39/39, WebDev 35/39,
+  Document 9/39, and Search 6/39.
+}
+
+% ===================================
+% RIGHT COLUMN
+% ===================================
+
+\column{0.33}
+
+% 4. Model Card
+
+\posterblock{4. Model Card}{
+  \postershot{5.png}{9.3cm}
+
+  A five-axis radar chart summarizes a
+  selected model's Intelligence, Coding,
+  Agentic, Cost, and Speed
+  \textbf{percentiles}.
+
+  Cost is reversed so farther outward
+  means cheaper; gaps indicate missing
+  values, not zero scores.
+
+  GPT-6 Astra, for example, ranks highly
+  on capability percentiles but poorly on cost.
+}
+
+% 5. Discussion Map
+
+\posterblock{5. Discussion Map}{
+  \postershot{6.png}{9.3cm}
+
+  This interactive view maps
+  \textbf{Hacker News comment trees}:
+  indentation represents reply depth,
+  block height represents text length,
+  and colored bands mark provider mentions.
+
+  Users can search, filter, collapse branches,
+  and read a synchronized comment subtree.
+
+  An example Mistral Large 4 thread includes
+  1,168 stored comments across
+  121 top-level branches.
+}
+
+% Key insights
+
+\posterblock{Key Insights}{
+  \begin{itemize}\tightitems
+    \item Several affordable models remain
+      \textbf{Pareto-efficient}, even when
+      they do not have the highest benchmark
+      score.
+
+    \item Speed and cost produce
+      \textbf{different trade-offs}.
+
+    \item Task leaders vary across
+      categories; Document and Search
+      have much sparser evaluation coverage.
+
+    \item Community discussions reveal
+      comparison contexts missing
+      from benchmark tables.
+
+    \item Strong capability often comes with
+      lower affordability or slower response.
+
+    \item Linked views turn broad rankings
+      into task-specific model shortlists.
+  \end{itemize}
+}
+
+% Conclusions
+
+\posterblock{Conclusions}{
+  \begin{itemize}\tightitems
+    \item Benchmarks and prices are
+      \textbf{snapshots}, not guaranteed
+      real-world performance or individual
+      token bills.
+
+    \item Cross-source model matching
+      and unequal category coverage limit
+      comparisons; forum mentions
+      do not imply approval.
+
+    \item Next: historical trends,
+      uncertainty, user-defined workloads,
+      and more accessible color scales.
+  \end{itemize}
+}
+
+\end{columns}
+
+% ===================================
+% REFERENCES AND TEAM CONTRIBUTIONS
+% ===================================
+
+\posterblock{References}{
+  \begin{minipage}[t]{0.65\linewidth}
+    \begin{minipage}[t]{0.47\linewidth}
+      \fontsize{13}{15}\selectfont
+
+      \textcolor{MyOrange}{\textbf{[1]}}
+      Artificial Analysis: benchmark data and API.
+      \href{https://artificialanalysis.ai/}
+      {\texttt{https://artificialanalysis.ai}}\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[2]}}
+      Artificial Analysis: capability--cost Pareto plot.\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[3]}}
+      Artificial Analysis: Cost per Task stacked bars.\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[4]}}
+      \href{https://arena.ai/leaderboard/agent}
+      {LMArena}: task leaderboards.
+      {\texttt{https://arena.ai/leaderboard/agent}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.47\linewidth}
+      \fontsize{13}{15}\selectfont
+
+      \textcolor{MyOrange}{\textbf{[5]}}
+      \href{https://arena.ai/}
+      {LMArena}: Battle Count heatmap inspiration.
+      {\texttt{https://arena.ai/}}\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[6]}}
+      \href{https://www.bilibili.com/video/BV1nXtX6REt8}
+      {Bilibili}: Model Card radar-chart inspiration.
+      \texttt{https://www.bilibili.com/video/BV1nXtX6REt8}\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[7]}}
+      \href{https://hn.algolia.com/}
+      {Hacker News / Algolia}: discussions API.
+      \texttt{https://hn.algolia.com/}\\[0.25em]
+
+      \textcolor{MyOrange}{\textbf{[7]}}
+      {Source Code}: https://github.com/ToothlessOS/llm-picker.
+
+      
+    \end{minipage}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.32\linewidth}
+    \noindent
+    \begin{minipage}[t]{0.75\linewidth}
+      {\color{MyOrange}\bfseries\fontsize{16}{19}\selectfont
+        Team Contributions}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.20\linewidth}
+      \centering
+      \href{https://github.com/ToothlessOS/llm-picker}{%
+        {\fontsize{32}{35}\selectfont
+          \color{MyBrown}\faGithub}}
+    \end{minipage}
+    \par\vspace{0.12em}
+
+    {\fontsize{13}{15}\selectfont
+      \begin{itemize}\tightitems
+        \item \textbf{Siyuan Cao:}
+          acquisition, backend APIs, refresh
+          pipeline, deployment, and testing.
+
+        \item \textbf{Ziyue Zhang:}
+          cleaning, D3 implementation,
+          performance views, frontend,
+          interface/interaction design,
+          and documentation.
+
+        \item \textbf{Haoyuan Zheng:}
+          frontend API/state foundations,
+          UI components, and documentation.
+
+        \item \textbf{All:}
+          analysis, design review,
+          and final presentation.
+      \end{itemize}
+    }
+  \end{minipage}
+}
+
+\end{document}
