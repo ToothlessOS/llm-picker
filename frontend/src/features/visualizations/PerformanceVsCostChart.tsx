@@ -1,529 +1,213 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef } from 'react'
 import {
-  axisBottom,
-  axisLeft,
-  curveMonotoneX,
-  Delaunay,
-  line,
-  pointer,
-  scaleLinear,
-  scaleLog,
-  select,
-  ticks,
-  type Selection,
+  axisBottom, axisLeft, brush, Delaunay, line, pointer,
+  scaleLinear, scaleLog, select, type D3BrushEvent,
 } from 'd3'
 
-import {
-  formatAxisCurrency,
-  LOG_COST_TICKS,
-  providerColor,
-  type ScatterModel,
-  type ScatterPoint,
-} from './scatter'
+import { formatAxisCurrency, providerColor, type ScatterModel } from './scatter'
+import { keysInScatterBounds, type CostScale } from './performanceComparison'
 
 export interface PerformanceVsCostChartProps {
   model: ScatterModel
   variant: 'preview' | 'interactive'
+  scoreLabel?: string
+  costLabel?: string
+  costScale?: CostScale
+  xDomain?: [number, number]
+  providers?: readonly string[]
   hoverKey?: string | null
   pinnedProvider?: string | null
+  pinnedKeys?: readonly string[]
+  brushedKeys?: readonly string[] | null
+  brushMode?: boolean
+  brushReset?: number
+  /** `lower` shades the fast-or-cheap side on the left. `higher` shades the right. */
+  xBetter?: 'lower' | 'higher'
+  formatX?: (value: number) => string
+  showScale?: boolean
   onHover?: (key: string | null) => void
   onSelect?: (key: string) => void
+  onBrush?: (keys: string[] | null) => void
 }
 
-interface ChartTokens {
-  text: string
-  muted: string
-  border: string
-  primary: string
-  surface: string
-  font: string
-}
-
-interface PlotFrame {
-  x: (value: number) => number
-  y: (value: number) => number
-  innerWidth: number
-  innerHeight: number
-  points: ScatterPoint[]
-}
-
-interface LabelBox {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-export function PerformanceVsCostChart({
-  model,
-  variant,
-  hoverKey = null,
-  pinnedProvider = null,
-  onHover,
-  onSelect,
-}: PerformanceVsCostChartProps) {
+export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
+  const { model, variant, scoreLabel = 'Intelligence index',
+    costLabel = 'Cost per task, USD', costScale = 'log', xDomain,
+    providers, brushMode = false, brushReset = 0, xBetter = 'lower',
+    formatX = formatAxisCurrency, showScale = true } = props
   const wrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
-  const frameRef = useRef<PlotFrame | null>(null)
-  const hoverKeyRef = useRef(hoverKey)
-  const pinnedProviderRef = useRef(pinnedProvider)
-  const onHoverRef = useRef(onHover)
-  const onSelectRef = useRef(onSelect)
-
-  useEffect(() => {
-    hoverKeyRef.current = hoverKey
-    pinnedProviderRef.current = pinnedProvider
-    onHoverRef.current = onHover
-    onSelectRef.current = onSelect
-  }, [hoverKey, onHover, onSelect, pinnedProvider])
+  const propsRef = useRef(props)
+  useLayoutEffect(() => { propsRef.current = props })
 
   useLayoutEffect(() => {
-    const node = wrapRef.current
-    if (!node) return
-
+    const wrapper = wrapRef.current
+    const svgNode = svgRef.current
+    if (!wrapper || !svgNode) return
     const render = () => {
-      const svg = svgRef.current
-      if (!svg) return
-      const width = node.clientWidth
-      const height = node.clientHeight
-      if (width < 40 || height < 40 || model.points.length === 0) return
-      drawChart(svg, {
-        height,
-        model,
-        onHover: (key) => onHoverRef.current?.(key),
-        onSelect: (key) => onSelectRef.current?.(key),
-        variant,
-        width,
-      })
-      frameRef.current = readFrame(svg)
-      applyFocus(svg, frameRef.current, hoverKeyRef.current, pinnedProviderRef.current)
+      const width = wrapper.clientWidth
+      const height = wrapper.clientHeight
+      if (width < 100 || height < 100) return
+      const interactive = variant === 'interactive'
+      const styles = getComputedStyle(document.documentElement)
+      const color = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback
+      const text = color('--color-text', '#1a2422')
+      const muted = color('--color-text-muted', '#6b736f')
+      const border = color('--color-border', '#ddd6cc')
+      const surface = color('--color-surface', '#fbf9f5')
+      const primary = color('--color-primary-strong', '#176b68')
+      const margin = { top: 26, right: 24, bottom: 54, left: interactive ? 70 : 48 }
+      const w = width - margin.left - margin.right
+      const h = height - margin.top - margin.bottom
+      const costs = model.points.map((point) => point.cost)
+      const minCost = costs.length ? Math.min(...costs) : 1
+      const maxCost = costs.length ? Math.max(...costs) : 1
+      const domain: [number, number] = xDomain ?? (costScale === 'log'
+        ? [minCost * 0.8, maxCost === minCost ? maxCost * 1.5 : maxCost * 1.2]
+        : [0, Math.max(maxCost * 1.12, 1)])
+      const x = (costScale === 'log' ? scaleLog() : scaleLinear()).domain(domain).range([0, w])
+      const scores = model.points.map((point) => point.intelligence)
+      const minScore = scores.length ? Math.min(...scores) : 0
+      const maxScore = scores.length ? Math.max(...scores) : 1
+      const span = maxScore - minScore || Math.max(Math.abs(maxScore) * 0.15, 0.01)
+      // Agent scores can be negative; all Y domains retain their actual range.
+      const y = scaleLinear().domain([minScore - span * 0.12, maxScore + span * 0.15]).range([h, 0])
+      const providerKeys = providers ?? model.points.map((point) => point.providerKey)
+      const svg = select(svgNode)
+      svg.selectAll('*').remove()
+      svg.attr('viewBox', `0 0 ${width} ${height}`)
+      const plot = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`)
+      if (model.points.length) {
+        const medianX = x(model.medianCost)
+        const quadrant = plot.append('rect').attr('class', 'pareto-quadrant')
+          .attr('y', 0)
+          .attr('height', Math.max(0, y(model.medianIntelligence)))
+          .attr('fill', primary).attr('fill-opacity', 0.08)
+        if (xBetter === 'higher') {
+          quadrant.attr('x', medianX).attr('width', Math.max(0, w - medianX))
+        } else {
+          quadrant.attr('x', 0).attr('width', Math.max(0, medianX))
+        }
+      }
+      const xTicks = costScale === 'log' ? x.ticks(7).filter((value) => {
+        const significant = value / 10 ** Math.floor(Math.log10(value))
+        return [1, 2, 5].some((tick) => Math.abs(significant - tick) < 0.001)
+      }) : x.ticks(width < 500 ? 4 : 6)
+      const yTicks = y.ticks(5)
+      plot.append('g').selectAll('line').data(yTicks).join('line')
+        .attr('x2', w).attr('y1', y).attr('y2', y).attr('stroke', border)
+      const xAxis = plot.append('g').attr('transform', `translate(0,${h})`)
+        .call(axisBottom(x).tickValues(xTicks).tickFormat((value) => formatX(Number(value))).tickSizeOuter(0))
+      const yAxis = plot.append('g').call(axisLeft(y).tickValues(yTicks).tickFormat((value) =>
+        new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(Number(value)),
+      ).tickSizeOuter(0))
+      for (const axis of [xAxis, yAxis]) {
+        axis.selectAll('line,path').attr('stroke', border)
+        axis.selectAll('text').attr('fill', muted).attr('font-size', 10)
+      }
+      plot.append('text').attr('class', 'pareto-axis-title').attr('x', w / 2).attr('y', h + 40)
+        .attr('text-anchor', 'middle').attr('fill', muted).attr('font-size', 10)
+        .text(showScale ? `${costLabel} (${costScale === 'log' ? 'log' : 'linear'})` : costLabel)
+      if (interactive) {
+        plot.append('text').attr('transform', 'rotate(-90)').attr('x', -h / 2).attr('y', -54)
+          .attr('text-anchor', 'middle').attr('fill', muted).attr('font-size', 10).text(scoreLabel)
+      }
+      const path = line<(typeof model.points)[number]>().x((point) => x(point.cost)).y((point) => y(point.intelligence))
+      plot.append('path').attr('class', 'pareto-front-line').attr('d', path(model.pareto) ?? '')
+        .attr('fill', 'none').attr('stroke', text).attr('stroke-width', 1.5).attr('stroke-dasharray', '3 4')
+      plot.append('line').attr('class', 'pareto-hair-x').attr('stroke', muted).attr('stroke-dasharray', '2 3').attr('opacity', 0)
+      plot.append('line').attr('class', 'pareto-hair-y').attr('stroke', muted).attr('stroke-dasharray', '2 3').attr('opacity', 0)
+      const dots = plot.append('g').attr('class', 'pareto-points').selectAll('circle').data(model.points).join('circle')
+        .attr('class', 'pareto-dot').attr('data-key', (point) => point.key)
+        .attr('cx', (point) => x(point.cost)).attr('cy', (point) => y(point.intelligence))
+        .attr('r', (point) => point.onPareto ? 6.5 : 4.5)
+        .attr('fill', (point) => interactive ? providerColor(point.providerKey, providerKeys) : primary)
+        .attr('stroke', (point) => point.onPareto ? text : surface).attr('stroke-width', 1.5)
+      dots.append('title').text((point) => `${point.name}: ${point.intelligence}; ${formatX(point.cost)}`)
+      const focusLabels = plot.append('g').attr('class', 'pareto-focus-labels')
+      const nearest = Delaunay.from(model.points, (point) => x(point.cost), (point) => y(point.intelligence))
+      const nearestKey = (event: MouseEvent) => {
+        if (!model.points.length) return null
+        const [mx, my] = pointer(event, plot.node())
+        const point = model.points[nearest.find(mx, my)]
+        return Math.hypot(x(point.cost) - mx, y(point.intelligence) - my) <= 25 ? point.key : null
+      }
+      if (interactive && brushMode) {
+        const behavior = brush<unknown>().extent([[0, 0], [w, h]])
+          .on('start', (event: D3BrushEvent<unknown>) => {
+            if (event.sourceEvent) propsRef.current.onHover?.(null)
+          })
+          .on('brush end', (event: D3BrushEvent<unknown>) => {
+            if (!event.sourceEvent) return
+            if (!event.selection) { propsRef.current.onBrush?.(null); return }
+            const [[x0, y0], [x1, y1]] = event.selection as [[number, number], [number, number]]
+            propsRef.current.onBrush?.(keysInScatterBounds(model, {
+              x: [x.invert(x0), x.invert(x1)], y: [y.invert(y1), y.invert(y0)],
+            }))
+          })
+        plot.append('g').attr('class', 'performance-brush').call(behavior)
+      } else if (interactive) {
+        plot.append('rect').attr('class', 'pareto-hitbox').attr('width', w).attr('height', h)
+          .attr('fill', 'transparent').style('touch-action', 'pan-y')
+          .on('pointermove', (event: MouseEvent) => propsRef.current.onHover?.(nearestKey(event)))
+          .on('pointerleave', () => propsRef.current.onHover?.(null))
+          .on('click', (event: MouseEvent) => { const key = nearestKey(event); if (key) propsRef.current.onSelect?.(key) })
+      }
+      const applyFocus = () => {
+        const { hoverKey, pinnedKeys = [], brushedKeys = null, pinnedProvider = null } = propsRef.current
+        const selected = new Set(pinnedKeys)
+        const brushed = brushedKeys === null ? null : new Set(brushedKeys)
+        dots.each(function (point) {
+          const node = select(this)
+          const active = point.key === hoverKey || selected.has(point.key)
+          const matched = brushed !== null && brushed.has(point.key)
+          const mutedPoint = !active && !matched && ((hoverKey != null) ||
+            brushed !== null ||
+            (pinnedProvider !== null && point.providerKey !== pinnedProvider) ||
+            selected.size > 0)
+          node.classed('is-muted', mutedPoint).classed('is-active', active)
+            .classed('is-pinned', selected.has(point.key))
+            .attr('r', active ? 8 : point.onPareto ? 6.5 : 4.5)
+            .attr('stroke-width', selected.has(point.key) ? 3 : 1.5)
+          if (active) node.raise()
+        })
+        const hovered = model.points.find((point) => point.key === hoverKey)
+        const labels = model.points.filter((point) => point.key === hoverKey)
+        focusLabels.selectAll('text').data(labels).join('text')
+          .attr('x', (point) => x(point.cost) + (x(point.cost) > w * 0.6 ? -12 : 12))
+          .attr('y', (point) => Math.max(12, y(point.intelligence) - 13))
+          .attr('text-anchor', (point) => x(point.cost) > w * 0.6 ? 'end' : 'start')
+          .attr('fill', text).attr('font-size', 11).attr('font-weight', 650)
+          .attr('paint-order', 'stroke').attr('stroke', surface).attr('stroke-width', 4)
+          .style('pointer-events', 'none').text((point) => point.name)
+        plot.select('.pareto-hair-x').attr('opacity', hovered ? 0.8 : 0)
+          .attr('x1', 0).attr('x2', hovered ? x(hovered.cost) : 0)
+          .attr('y1', hovered ? y(hovered.intelligence) : 0).attr('y2', hovered ? y(hovered.intelligence) : 0)
+        plot.select('.pareto-hair-y').attr('opacity', hovered ? 0.8 : 0)
+          .attr('x1', hovered ? x(hovered.cost) : 0).attr('x2', hovered ? x(hovered.cost) : 0)
+          .attr('y1', h).attr('y2', hovered ? y(hovered.intelligence) : 0)
+      }
+      svg.datum({ applyFocus })
+      applyFocus()
     }
-
     render()
-    const observer =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(render)
-    observer?.observe(node)
-    const themeObserver = new MutationObserver(render)
-    themeObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    })
-    return () => {
-      observer?.disconnect()
-      themeObserver.disconnect()
-    }
-  }, [model, variant])
+    const observer = new ResizeObserver(render)
+    observer.observe(wrapper)
+    const themes = new MutationObserver(render)
+    themes.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => { observer.disconnect(); themes.disconnect() }
+  }, [model, variant, scoreLabel, costLabel, costScale, xDomain, providers, brushMode, brushReset, xBetter, formatX, showScale])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const svg = svgRef.current
-    if (!svg || !frameRef.current) return
-    applyFocus(svg, frameRef.current, hoverKey, pinnedProvider)
-  }, [hoverKey, pinnedProvider])
-
-  const interactive = variant === 'interactive'
+    if (svg) (select(svg).datum() as { applyFocus: () => void } | undefined)?.applyFocus()
+  }, [props.hoverKey, props.pinnedKeys, props.brushedKeys, props.pinnedProvider])
 
   return (
     <div className={`pareto-chart pareto-chart--${variant}`} ref={wrapRef}>
-      <svg
-        aria-hidden={interactive ? undefined : true}
-        aria-label={
-          interactive
-            ? 'Scatter plot of intelligence index versus cost per task, with a Pareto front and most attractive quadrant'
-            : undefined
-        }
-        ref={svgRef}
-        role={interactive ? 'img' : undefined}
-      />
+      <svg ref={svgRef} role={variant === 'interactive' ? 'img' : undefined}
+        aria-hidden={variant === 'preview' ? true : undefined}
+        aria-label={variant === 'interactive' ? `${scoreLabel} versus ${costLabel}` : undefined} />
     </div>
-  )
-}
-
-function drawChart(
-  svgNode: SVGSVGElement,
-  options: {
-    width: number
-    height: number
-    model: ScatterModel
-    variant: 'preview' | 'interactive'
-    onHover?: (key: string | null) => void
-    onSelect?: (key: string) => void
-  },
-) {
-  const { width, height, model, variant, onHover, onSelect } = options
-  const interactive = variant === 'interactive'
-  const tokens = readTokens(svgNode)
-  const margin =
-    variant === 'preview'
-      ? { top: 18, right: 16, bottom: 36, left: 42 }
-      : { top: 22, right: 132, bottom: 52, left: 58 }
-  const innerWidth = Math.max(width - margin.left - margin.right, 40)
-  const innerHeight = Math.max(height - margin.top - margin.bottom, 40)
-  const costs = model.points.map((point) => point.cost)
-  const scores = model.points.map((point) => point.intelligence)
-  const x = scaleLog()
-    .domain(paddedLogDomain(costs))
-    .range([0, innerWidth])
-  const y = scaleLinear()
-    .domain(paddedLinearDomain(scores))
-    .range([innerHeight, 0])
-  const xTicks = LOG_COST_TICKS.filter(
-    (tick) => tick >= x.domain()[0] && tick <= x.domain()[1],
-  )
-  const yTicks = ticks(y.domain()[0], y.domain()[1], variant === 'preview' ? 4 : 6)
-  const providers = model.points.map((point) => point.providerKey)
-  const svg = select(svgNode)
-  svg.selectAll('*').remove()
-  svg.attr('viewBox', `0 0 ${width} ${height}`).attr('width', width).attr('height', height)
-  svg.style('font-family', tokens.font)
-
-  const plot = svg
-    .append('g')
-    .attr('class', 'pareto-plot')
-    .attr('transform', `translate(${margin.left},${margin.top})`)
-
-  const medianX = x(model.medianCost)
-  const medianY = y(model.medianIntelligence)
-  const quadrantWidth = Math.max(medianX, 0)
-  const quadrantHeight = Math.max(medianY, 0)
-  if (quadrantWidth > 8 && innerHeight - quadrantHeight > 8) {
-    plot
-      .append('rect')
-      .attr('class', 'pareto-quadrant')
-      .attr('x', 0)
-      .attr('y', 0)
-      .attr('width', quadrantWidth)
-      .attr('height', medianY)
-      .attr('fill', tokens.primary)
-      .attr('fill-opacity', 0.12)
-    if (quadrantWidth > 72 && medianY > 28) {
-      plot
-        .append('text')
-        .attr('class', 'pareto-quadrant-label')
-        .attr('x', 8)
-        .attr('y', 16)
-        .attr('fill', tokens.primary)
-        .attr('font-size', variant === 'preview' ? 9 : 11)
-        .attr('font-weight', 650)
-        .attr('letter-spacing', '0.04em')
-        .text('Most attractive')
-    }
-  }
-
-  plot
-    .append('g')
-    .attr('class', 'pareto-grid')
-    .selectAll('line')
-    .data(yTicks)
-    .join('line')
-    .attr('x1', 0)
-    .attr('x2', innerWidth)
-    .attr('y1', (value) => y(value))
-    .attr('y2', (value) => y(value))
-    .attr('stroke', tokens.border)
-    .attr('stroke-width', 1)
-
-  if (interactive) {
-    plot
-      .append('g')
-      .attr('class', 'pareto-grid')
-      .selectAll('line')
-      .data(xTicks)
-      .join('line')
-      .attr('x1', (value) => x(value))
-      .attr('x2', (value) => x(value))
-      .attr('y1', 0)
-      .attr('y2', innerHeight)
-      .attr('stroke', tokens.border)
-      .attr('stroke-width', 1)
-  }
-
-  const xAxis = axisBottom(x)
-    .tickValues(xTicks.map((tick) => tick))
-    .tickFormat((value) => formatAxisCurrency(Number(value)))
-    .tickSizeOuter(0)
-  const yAxis = axisLeft(y)
-    .tickValues(yTicks)
-    .tickFormat((value) => String(Number(value)))
-    .tickSizeOuter(0)
-
-  const xAxisGroup = plot
-    .append('g')
-    .attr('transform', `translate(0,${innerHeight})`)
-    .call(xAxis)
-  const yAxisGroup = plot.append('g').call(yAxis)
-  styleAxis(xAxisGroup, tokens)
-  styleAxis(yAxisGroup, tokens)
-
-  plot
-    .append('text')
-    .attr('class', 'pareto-axis-title')
-    .attr('x', innerWidth / 2)
-    .attr('y', innerHeight + (variant === 'preview' ? 28 : 40))
-    .attr('text-anchor', 'middle')
-    .attr('fill', tokens.muted)
-    .attr('font-size', variant === 'preview' ? 10 : 12)
-    .text(variant === 'preview' ? 'Cost / task (log)' : 'Cost per task, USD (log scale)')
-
-  plot
-    .append('text')
-    .attr('class', 'pareto-axis-title')
-    .attr('transform', 'rotate(-90)')
-    .attr('x', -innerHeight / 2)
-    .attr('y', variant === 'preview' ? -30 : -42)
-    .attr('text-anchor', 'middle')
-    .attr('fill', tokens.muted)
-    .attr('font-size', variant === 'preview' ? 10 : 12)
-    .text(variant === 'preview' ? 'Intelligence' : 'Intelligence index')
-
-  const paretoLine = line<ScatterPoint>()
-    .x((point) => x(point.cost))
-    .y((point) => y(point.intelligence))
-    .curve(curveMonotoneX)
-
-  plot
-    .append('path')
-    .attr('class', 'pareto-front-line')
-    .attr('d', paretoLine(model.pareto) ?? '')
-    .attr('fill', 'none')
-    .attr('stroke', tokens.text)
-    .attr('stroke-width', 1.5)
-    .attr('stroke-dasharray', '1.5 3.5')
-    .attr('opacity', 0.72)
-
-  plot
-    .append('line')
-    .attr('class', 'pareto-hair pareto-hair-x')
-    .attr('stroke', tokens.muted)
-    .attr('stroke-dasharray', '2 3')
-    .attr('opacity', 0)
-  plot
-    .append('line')
-    .attr('class', 'pareto-hair pareto-hair-y')
-    .attr('stroke', tokens.muted)
-    .attr('stroke-dasharray', '2 3')
-    .attr('opacity', 0)
-
-  const radius = (point: ScatterPoint) => {
-    if (variant === 'preview') return point.onPareto ? 5.5 : 4
-    return point.onPareto ? 7.5 : 5.5
-  }
-
-  plot
-    .append('g')
-    .attr('class', 'pareto-points')
-    .selectAll('circle')
-    .data(model.points)
-    .join('circle')
-    .attr('class', 'pareto-dot')
-    .attr('data-key', (point) => point.key)
-    .attr('data-provider', (point) => point.providerKey)
-    .attr('data-r', (point) => radius(point))
-    .attr('cx', (point) => x(point.cost))
-    .attr('cy', (point) => y(point.intelligence))
-    .attr('r', (point) => radius(point))
-    .attr(
-      'fill',
-      (point) =>
-        variant === 'preview' ? tokens.primary : providerColor(point.providerKey, providers),
-    )
-    .attr('stroke', (point) => (point.onPareto ? tokens.text : tokens.surface))
-    .attr('stroke-width', (point) => (point.onPareto ? 1.6 : 1.2))
-
-  if (interactive) {
-    const labels = layoutLabels(model.pareto, x, y, innerWidth)
-    plot
-      .append('g')
-      .attr('class', 'pareto-labels')
-      .selectAll('text')
-      .data(labels)
-      .join('text')
-      .attr('class', 'pareto-label')
-      .attr('data-key', (label) => label.point.key)
-      .attr('x', (label) => label.x)
-      .attr('y', (label) => label.y)
-      .attr('text-anchor', (label) => label.anchor)
-      .attr('fill', tokens.text)
-      .attr('font-size', 11)
-      .attr('font-weight', 600)
-      .text((label) => label.point.name)
-  }
-
-  const hitbox = plot
-    .append('rect')
-    .attr('class', 'pareto-hitbox')
-    .attr('width', innerWidth)
-    .attr('height', innerHeight)
-    .attr('fill', 'transparent')
-    .style('pointer-events', interactive ? 'all' : 'none')
-
-  if (interactive) {
-    const delaunay = Delaunay.from(
-      model.points,
-      (point) => x(point.cost),
-      (point) => y(point.intelligence),
-    )
-    const nearestKey = (event: PointerEvent) => {
-      const [mx, my] = pointer(event)
-      const index = delaunay.find(mx, my)
-      const point = model.points[index]
-      if (!point) return null
-      const distance = Math.hypot(x(point.cost) - mx, y(point.intelligence) - my)
-      return distance <= 52 ? point.key : null
-    }
-
-    hitbox
-      .on('pointermove', (event: PointerEvent) => {
-        const key = nearestKey(event)
-        hitbox.style('cursor', key ? 'pointer' : 'default')
-        onHover?.(key)
-      })
-      .on('pointerleave', () => onHover?.(null))
-      .on('click', (event: PointerEvent) => {
-        const key = nearestKey(event)
-        if (key) onSelect?.(key)
-      })
-  }
-
-  svg.datum({ x, y, innerWidth, innerHeight, points: model.points } satisfies PlotFrame)
-}
-
-function readFrame(svgNode: SVGSVGElement): PlotFrame | null {
-  return (select(svgNode).datum() as PlotFrame | undefined) ?? null
-}
-
-function applyFocus(
-  svgNode: SVGSVGElement,
-  frame: PlotFrame | null,
-  hoverKey: string | null,
-  pinnedProvider: string | null,
-) {
-  if (!frame) return
-  const root = select(svgNode)
-  root.selectAll<SVGCircleElement, ScatterPoint>('circle.pareto-dot').each(function () {
-    const node = select(this)
-    const key = node.attr('data-key')
-    const provider = node.attr('data-provider')
-    const isActive = hoverKey === key
-    const isPinnedOut =
-      pinnedProvider !== null && provider !== pinnedProvider && !isActive
-    const isMuted = Boolean(hoverKey && !isActive) || isPinnedOut
-    const baseRadius = Number(node.attr('data-r'))
-    node.classed('is-active', isActive)
-    node.classed('is-muted', isMuted)
-    node.attr('r', isActive ? baseRadius + 2.2 : baseRadius)
-  })
-  root.selectAll<SVGTextElement, unknown>('text.pareto-label').each(function () {
-    const node = select(this)
-    const key = node.attr('data-key')
-    node.classed('is-active', hoverKey === key)
-    node.classed('is-muted', Boolean(hoverKey && hoverKey !== key))
-  })
-
-  const active = frame.points.find((point) => point.key === hoverKey)
-  const hairX = root.select('.pareto-hair-x')
-  const hairY = root.select('.pareto-hair-y')
-  if (!active) {
-    hairX.attr('opacity', 0)
-    hairY.attr('opacity', 0)
-    return
-  }
-  const px = frame.x(active.cost)
-  const py = frame.y(active.intelligence)
-  hairX
-    .attr('x1', 0)
-    .attr('x2', px)
-    .attr('y1', py)
-    .attr('y2', py)
-    .attr('opacity', 0.9)
-  hairY
-    .attr('x1', px)
-    .attr('x2', px)
-    .attr('y1', frame.innerHeight)
-    .attr('y2', py)
-    .attr('opacity', 0.9)
-}
-
-function styleAxis(
-  group: Selection<SVGGElement, unknown, null, undefined>,
-  tokens: ChartTokens,
-) {
-  group.select('.domain').attr('stroke', tokens.border)
-  group.selectAll('line').attr('stroke', tokens.border)
-  group
-    .selectAll('text')
-    .attr('fill', tokens.muted)
-    .attr('font-size', 10)
-    .attr('font-family', tokens.font)
-}
-
-function readTokens(node: Element): ChartTokens {
-  const styles = getComputedStyle(node)
-  const token = (name: string) => {
-    const fromNode = styles.getPropertyValue(name).trim()
-    if (fromNode) return fromNode
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  }
-  return {
-    text: token('--color-text') || '#1a2422',
-    muted: token('--color-text-muted') || '#6b736f',
-    border: token('--color-border') || '#ddd6cc',
-    primary: token('--color-primary') || '#176b68',
-    surface: token('--color-surface') || '#fbf9f5',
-    font: token('--font-sans') || 'DM Sans, sans-serif',
-  }
-}
-
-function paddedLogDomain(values: readonly number[]): [number, number] {
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  if (min === max) return [min / 2, max * 2]
-  return [min * 0.82, max * 1.22]
-}
-
-function paddedLinearDomain(values: readonly number[]): [number, number] {
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  const span = max - min || 10
-  return [Math.max(0, min - span * 0.14), max + span * 0.16]
-}
-
-function layoutLabels(
-  points: readonly ScatterPoint[],
-  x: (value: number) => number,
-  y: (value: number) => number,
-  innerWidth: number,
-) {
-  const placed: LabelBox[] = []
-  return points.map((point) => {
-    const px = x(point.cost)
-    const py = y(point.intelligence)
-    const width = Math.min(point.name.length * 6.3 + 4, 168)
-    const height = 14
-    const preferEnd = px > innerWidth * 0.58
-    const anchor: 'start' | 'end' = preferEnd ? 'end' : 'start'
-    let lx = preferEnd ? px - 10 : px + 10
-    let ly = py - 8
-    const box = (): LabelBox => ({
-      x: anchor === 'start' ? lx : lx - width,
-      y: ly - height,
-      width,
-      height,
-    })
-    let attempts = 0
-    while (placed.some((other) => overlaps(box(), other)) && attempts < 10) {
-      ly -= 12
-      attempts += 1
-    }
-    placed.push(box())
-    return { point, x: lx, y: ly, anchor }
-  })
-}
-
-function overlaps(left: LabelBox, right: LabelBox): boolean {
-  return !(
-    left.x + left.width < right.x ||
-    right.x + right.width < left.x ||
-    left.y + left.height < right.y ||
-    right.y + right.height < left.y
   )
 }
