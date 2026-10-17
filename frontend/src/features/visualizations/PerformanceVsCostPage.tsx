@@ -67,7 +67,9 @@ export function PerformanceVsCostPage() {
     [comparison.rows, costMetric, costScale])
   const speedRecords = useMemo(() => buildSpeedParallelRecords(comparison.rows, speedMetric),
     [comparison.rows, speedMetric])
-  const parallelKeys = useMemo(() => keysMatchingAxisBrushes(records, axisBrushes), [records, axisBrushes])
+  const parallelKeys = useMemo(() => keysMatchingAxisBrushes(
+    explorer === 'speed' ? speedRecords : records, axisBrushes,
+  ), [explorer, speedRecords, records, axisBrushes])
   const brushedKeys = useMemo(() => combineBrushes(parallelKeys, scatterBrushKeys), [parallelKeys, scatterBrushKeys])
   const ranks = useMemo(() => Object.fromEntries(PERFORMANCE_METRICS.map((item) =>
     [item, metricRanks(comparison.rows, item)])) as Record<PerformanceMetric, Map<string, number>>, [comparison.rows])

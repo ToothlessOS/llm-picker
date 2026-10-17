@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import {
   axisLeft, axisRight, brushY, line, scaleLinear, scaleLog, scalePoint, select,
-  type D3BrushEvent, type ScaleLinear, type ScaleLog,
+  type D3BrushEvent, type ScaleLinear, type ScaleLogarithmic,
 } from 'd3'
 
 import { formatAxisCurrency } from './scatter'
@@ -66,7 +66,7 @@ export function ParallelCoordinatesChart(props: ParallelCoordinatesChartProps) {
       const h = height - margin.top - margin.bottom
       const x = scalePoint<ParallelAxis>().domain([...axes]).range([0, w]).padding(0)
       const lead = axes[0]
-      const y = new Map<ParallelAxis, ScaleLinear<number, number> | ScaleLog<number, number>>()
+      const y = new Map<ParallelAxis, ScaleLinear<number, number> | ScaleLogarithmic<number, number>>()
       for (const axis of axes) {
         if (axis === lead) {
           y.set(axis, (costScale === 'log' ? scaleLog() : scaleLinear())

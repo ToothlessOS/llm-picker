@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
@@ -28,6 +28,8 @@ const makeRow = vi.hoisted(() => {
     organization: string
     intelligence: number | null
     cost: number | null
+    outputSpeed?: number | null
+    latency?: number | null
   }): OverviewRow {
     return {
       model: {
@@ -78,8 +80,8 @@ const makeRow = vi.hoisted(() => {
           price_1m_cache_write_tokens: null,
         },
         performance: {
-        median_output_tokens_per_second: 80,
-        median_time_to_first_token_seconds: 2,
+          median_output_tokens_per_second: input.outputSpeed === undefined ? 80 : input.outputSpeed,
+          median_time_to_first_token_seconds: input.latency === undefined ? 2 : input.latency,
           median_time_to_first_answer_token_seconds: null,
           median_end_to_end_response_time_seconds: null,
         },
@@ -120,6 +122,8 @@ vi.mock('../../api', async (importOriginal) => {
           organization: 'openai',
           intelligence: 40,
           cost: 0.5,
+          outputSpeed: 100,
+          latency: 1,
         }),
         makeRow({
           key: 'expensive-weak',
@@ -128,7 +132,8 @@ vi.mock('../../api', async (importOriginal) => {
           intelligence: 25,
           cost: 2,
         }),
-        makeRow({ key: 'fourth', name: 'Fourth', organization: 'openai', intelligence: 30, cost: 1 }),
+        makeRow({ key: 'fourth', name: 'Fourth', organization: 'openai', intelligence: 30, cost: 1,
+          outputSpeed: null, latency: null }),
       ],
       meta: {
         generated_at: '2026-09-15T00:00:00Z',
@@ -244,5 +249,54 @@ describe('PerformanceVsCostPage', () => {
     expect(screen.getByRole('heading', { name: 'Time to first token (seconds)' })).toBeTruthy()
     expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-scale')).toBe('log')
     expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
+  })
+
+  it('links real parallel-axis brushes to output speed and first-token latency', async () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(720)
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(340)
+    const user = userEvent.setup()
+    const page = renderPage()
+    const brushLeadAxis = (top: number, bottom: number) => {
+      const overlay = page.container.querySelector('.parallel-brush .overlay')!
+      const mouse = (type: string, target: Element | Window, clientY: number) => {
+        const event = new MouseEvent(type, { clientX: 0, clientY, bubbles: true, buttons: 1 })
+        Object.defineProperty(event, 'view', { value: document.defaultView })
+        fireEvent(target, event)
+      }
+      mouse('mousedown', overlay, top)
+      mouse('mousemove', window, bottom)
+      mouse('mouseup', window, bottom)
+    }
+
+    try {
+      await screen.findByRole('button', { name: 'Pin Balanced' })
+      await user.click(screen.getByRole('tab', { name: 'Performance vs. speed' }))
+      expect(screen.queryByRole('button', { name: 'Pin Fourth' })).toBeNull()
+
+      // A band near the top of the output-speed axis contains 100, but not 80 tok/s.
+      brushLeadAxis(8, 40)
+      expect(screen.getByRole('button', { name: 'Pin Balanced' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
+      expect(screen.getByText('1 models match Speed')).toBeTruthy()
+      expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-brushed')).toBe('mid')
+
+      await user.click(screen.getByRole('button', { name: 'Clear brush' }))
+      expect(screen.getByRole('button', { name: 'Pin Cheap weak' })).toBeTruthy()
+      await user.selectOptions(screen.getByLabelText('Speed measure'), 'ttft')
+
+      // On the reversed log-latency axis this band contains 1, but not 2 seconds.
+      brushLeadAxis(50, 80)
+      expect(screen.getByRole('button', { name: 'Pin Balanced' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
+      expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-brushed')).toBe('mid')
+
+      await user.click(screen.getByRole('tab', { name: 'Performance vs. cost' }))
+      expect(screen.getByRole('button', { name: 'Pin Fourth' })).toBeTruthy()
+      expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-brushed')).toBe('none')
+    } finally {
+      page.unmount()
+      width.mockRestore()
+      height.mockRestore()
+    }
   })
 })
