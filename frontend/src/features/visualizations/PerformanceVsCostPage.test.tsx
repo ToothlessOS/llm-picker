@@ -6,6 +6,20 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { OverviewRow } from '../../api'
 import { PerformanceVsCostPage } from './PerformanceVsCostPage'
+import type { PerformanceVsCostChartProps } from './PerformanceVsCostChart'
+
+vi.mock('./PerformanceVsCostChart', () => ({
+  PerformanceVsCostChart: (props: PerformanceVsCostChartProps) => (
+    <div data-testid={props.scoreLabel} data-pinned={props.pinnedKeys?.join(',')}
+      data-hover={props.hoverKey ?? ''} data-brushed={props.brushedKeys?.join(',') ?? 'none'}
+      data-domain={props.xDomain?.join(',')} data-scale={props.costScale}
+      data-providers={props.providers?.join(',')}>
+      <button onClick={() => props.onBrush?.(['mid'])}>Brush {props.scoreLabel}</button>
+      <button onClick={() => props.onBrush?.([])}>Empty brush {props.scoreLabel}</button>
+      <button onClick={() => props.onSelect?.('mid')}>Pick {props.scoreLabel}</button>
+    </div>
+  ),
+}))
 
 const makeRow = vi.hoisted(() => {
   return function makeRow(input: {
@@ -53,13 +67,13 @@ const makeRow = vi.hoisted(() => {
         release_date: null,
         intelligence_index_version: 1,
         intelligence_index: input.intelligence,
-        coding_index: null,
+        coding_index: input.key === 'expensive-weak' ? null : 60,
         agentic_index: null,
         intelligence_index_total_cost: null,
         cost_per_task: input.cost,
         pricing: {
-          price_1m_input_tokens: null,
-          price_1m_output_tokens: null,
+          price_1m_input_tokens: input.key === 'cheap-weak' ? 0 : 5,
+          price_1m_output_tokens: 10,
           price_1m_cache_hit_tokens: null,
           price_1m_cache_write_tokens: null,
         },
@@ -114,6 +128,7 @@ vi.mock('../../api', async (importOriginal) => {
           intelligence: 25,
           cost: 2,
         }),
+        makeRow({ key: 'fourth', name: 'Fourth', organization: 'openai', intelligence: 30, cost: 1 }),
       ],
       meta: {
         generated_at: '2026-09-15T00:00:00Z',
@@ -138,20 +153,73 @@ function renderPage() {
 }
 
 describe('PerformanceVsCostPage', () => {
-  it('lists Pareto models and inspects one on hover', async () => {
+  it('shows three stacked views and shares hover, pins, and details', async () => {
     const user = userEvent.setup()
     renderPage()
 
     expect(await screen.findByRole('heading', { name: 'Performance vs. cost' })).toBeTruthy()
-    const cheap = await screen.findByRole('link', { name: /Cheap weak/ })
-    expect(cheap.getAttribute('href')).toBe('/models/cheap-weak')
-    expect(screen.getByRole('link', { name: /Balanced/ })).toBeTruthy()
-    expect(screen.queryByRole('link', { name: /Expensive weak/ })).toBeNull()
+    const cheap = await screen.findByRole('button', { name: 'Pin Cheap weak' })
+    const labels = ['AA Intelligence Index', 'AA Coding Index', 'LMArena Agent Score']
+    for (const label of labels) expect(screen.getByRole('heading', { name: label })).toBeTruthy()
 
     await user.hover(cheap)
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Cheap weak' })).toBeTruthy()
     })
-    expect(screen.getByText(/On the Pareto front/)).toBeTruthy()
+    for (const label of labels) expect(screen.getByTestId(label).getAttribute('data-hover')).toBe('cheap-weak')
+    await user.click(cheap)
+    for (const label of labels) expect(screen.getByTestId(label).getAttribute('data-pinned')).toBe('cheap-weak')
+    expect(screen.getByRole('link', { name: 'Model page' }).getAttribute('href')).toBe('/models/cheap-weak')
+    expect(screen.getByRole('region', { name: 'Pinned model comparison' })).toBeTruthy()
+    expect(new Set(labels.map((label) => screen.getByTestId(label).getAttribute('data-domain'))).size).toBe(1)
+  })
+
+  it('coordinates brushing, including empty brushes, across all views and the model list', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByRole('button', { name: 'Pin Balanced' })
+    await user.click(screen.getByRole('button', { name: 'Brush AA Coding Index' }))
+    for (const label of ['AA Intelligence Index', 'AA Coding Index', 'LMArena Agent Score']) {
+      expect(screen.getByTestId(label).getAttribute('data-brushed')).toBe('mid')
+    }
+    expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
+    expect(screen.getByRole('status').textContent).toContain('1 models brushed')
+    await user.click(screen.getByRole('button', { name: 'Empty brush AA Coding Index' }))
+    expect(screen.queryByRole('button', { name: 'Pin Balanced' })).toBeNull()
+    expect(screen.getByRole('status').textContent).toContain('0 models brushed')
+    await user.click(screen.getByRole('button', { name: 'Clear brush' }))
+    expect(screen.getByRole('button', { name: 'Pin Cheap weak' })).toBeTruthy()
+  })
+
+  it('changes costs, scales, providers and visibility without dropping pinned models', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByRole('button', { name: 'Pin Cheap weak' }))
+    await user.selectOptions(screen.getByLabelText('Cost reference'), 'input')
+    expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
+    await user.click(screen.getByRole('radio', { name: 'Linear' }))
+    expect(screen.getByRole('button', { name: 'Pin Cheap weak' })).toBeTruthy()
+    await user.selectOptions(screen.getByLabelText('Provider'), 'openai')
+    expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Cheap weak' })).toBeTruthy()
+    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak')
+    expect(screen.getByTestId('AA Coding Index').getAttribute('data-scale')).toBe('linear')
+    await user.click(screen.getByRole('checkbox', { name: 'AA Coding Index' }))
+    expect(screen.queryByRole('heading', { name: 'AA Coding Index' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'AA Intelligence Index' })).toBeTruthy()
+  })
+
+  it('caps the comparison at three models and clears shared selections', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    for (const name of ['Cheap weak', 'Balanced', 'Expensive weak']) {
+      await user.click(await screen.findByRole('button', { name: `Pin ${name}` }))
+    }
+    await user.click(screen.getByRole('button', { name: 'Pin Fourth' }))
+    expect(screen.getByRole('status').textContent).toContain('Comparison is full')
+    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak,mid,expensive-weak')
+    await user.click(screen.getByRole('button', { name: 'Clear selection' }))
+    expect(screen.queryByRole('region', { name: 'Pinned model comparison' })).toBeNull()
+    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('')
   })
 })

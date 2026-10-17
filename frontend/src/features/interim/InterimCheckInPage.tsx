@@ -24,7 +24,7 @@ const visualizations: VisualizationSummary[] = [
     title: 'Performance vs. cost',
     question: 'Which models offer the strongest capability at a given price?',
     encoding:
-      'Position maps cost per task and intelligence; color identifies provider, and the frontier marks efficient choices.',
+      'Three linked scatter plots map Intelligence Index, Coding Index, and LMArena Agent Score against a shared cost reference; color identifies provider and each frontier marks efficient choices.',
     source: 'Artificial Analysis models joined to LMArena agent entries.',
     path: '/visualizations/performance-vs-cost',
     Preview: PerformanceVsCostPreview,
@@ -84,7 +84,7 @@ const processingSteps = [
 const interactionRows = [
   {
     visualization: 'Performance vs. cost',
-    interaction: 'Hover to inspect a model, focus a provider, and open model details.',
+    interaction: 'Inspect models, pin up to three, brush linked selections, and change cost references, scales, providers, or visible views.',
     animation: 'Transition points and the Pareto frontier when filters change.',
     purpose: 'Reveal tradeoffs and make efficient alternatives easier to compare.',
   },

@@ -14,6 +14,13 @@ import { buildTaskFitModel, taskFitSourcesFromOverview } from './taskFit'
 export const OVERVIEW_VIZ_QUERY_KEY = ['overview', 'viz', 'all-categories'] as const
 export const OVERVIEW_SCATTER_QUERY_KEY = OVERVIEW_VIZ_QUERY_KEY
 
+export function useOverviewPerformance() {
+  return useQuery({
+    queryKey: OVERVIEW_VIZ_QUERY_KEY,
+    queryFn: ({ signal }) => fetchOverviewViz({ signal }),
+  })
+}
+
 function fetchOverviewViz(options?: ApiRequestOptions): Promise<OverviewResponse> {
   return collectPaginatedOverview(
     getOverview,

@@ -114,8 +114,12 @@ export function formatAxisCurrency(value: number): string {
 
 export function buildScatterModel(
   sources: readonly ScatterSource[],
+  options: { allowZeroCost?: boolean } = {},
 ): ScatterModel {
-  const plotted = sources.filter(isPlottable)
+  const plotted = sources.filter((source): source is ScatterSource & { intelligence: number; cost: number } =>
+    isPlottable(source) || Boolean(options.allowZeroCost && source.cost === 0 &&
+      source.intelligence !== null && Number.isFinite(source.intelligence)),
+  )
   const omitted = sources.length - plotted.length
   const medianCost = median(plotted.map((source) => source.cost))
   const medianIntelligence = median(
