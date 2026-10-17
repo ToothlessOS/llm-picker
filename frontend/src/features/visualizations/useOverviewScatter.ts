@@ -10,6 +10,7 @@ import { buildCostBarModel, costBarSourcesFromOverview } from './costBars'
 import { buildModelCardCatalog, modelCardSourcesFromOverview } from './modelCard'
 import { buildScatterModel, scatterSourcesFromOverview } from './scatter'
 import { buildTaskFitModel, taskFitSourcesFromOverview } from './taskFit'
+import { latestReleases } from '../home/latestReleases'
 
 export const OVERVIEW_VIZ_QUERY_KEY = ['overview', 'viz', 'all-categories'] as const
 export const OVERVIEW_SCATTER_QUERY_KEY = OVERVIEW_VIZ_QUERY_KEY
@@ -18,6 +19,16 @@ export function useOverviewPerformance() {
   return useQuery({
     queryKey: OVERVIEW_VIZ_QUERY_KEY,
     queryFn: ({ signal }) => fetchOverviewViz({ signal }),
+  })
+}
+
+/** The three newest releases. Refetches so a later leaderboard sync replaces them. */
+export function useLatestReleaseNotes() {
+  return useQuery({
+    queryKey: OVERVIEW_VIZ_QUERY_KEY,
+    queryFn: ({ signal }) => fetchOverviewViz({ signal }),
+    refetchInterval: 60_000,
+    select: (response) => latestReleases(response.results),
   })
 }
 

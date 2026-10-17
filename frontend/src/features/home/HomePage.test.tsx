@@ -50,23 +50,24 @@ describe('HomePage', () => {
     renderHome()
 
     expect(
-      screen.getByRole('heading', { name: /Which model is worth/ }),
+      screen.getByRole('heading', { name: /Find the right model/ }),
     ).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Performance vs. cost' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Cost per task' })).toBeTruthy()
-    expect(screen.getByText('Where does the money go? Split by list prices, not usage.')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Task fit' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Model card' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'Performance vs. cost' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('heading', { name: 'Performance explorer' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Cost Breakdown' })).toBeTruthy()
+    expect(screen.getByText('Where does the money go?')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Task Fit' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Model Card' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Explore further' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Performance explorer' }).getAttribute('href')).toBe(
       '/visualizations/performance-vs-cost',
     )
-    expect(screen.getByRole('link', { name: 'Cost per task' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Cost Breakdown' }).getAttribute('href')).toBe(
       '/visualizations/cost-per-task',
     )
-    expect(screen.getByRole('link', { name: 'Task fit' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Task Fit' }).getAttribute('href')).toBe(
       '/visualizations/task-fit',
     )
-    expect(screen.getByRole('link', { name: 'Model card' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Model Card' }).getAttribute('href')).toBe(
       '/visualizations/model-card',
     )
     expect(screen.getByRole('link', { name: /Complete matched table/ }).getAttribute('href')).toBe(
@@ -82,7 +83,7 @@ describe('HomePage', () => {
       '/data-quality',
     )
 
-    expect(screen.getByRole('link', { name: /Discussion map/ }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'What are people saying?' }).getAttribute('href')).toBe(
       '/discussions/map',
     )
     // The placeholder this feature replaced. Named as a test so that putting it
@@ -90,7 +91,7 @@ describe('HomePage', () => {
     expect(screen.queryByText(/coming soon/i)).toBeNull()
 
     const dataHeading = screen.getByRole('heading', { name: 'Models' })
-    const cover = screen.getByRole('heading', { name: /Which model is worth/ })
+    const cover = screen.getByRole('heading', { name: /Find the right model/ })
     expect(
       Boolean(dataHeading.compareDocumentPosition(cover) & Node.DOCUMENT_POSITION_FOLLOWING),
     ).toBe(true)

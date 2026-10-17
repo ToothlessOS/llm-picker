@@ -26,6 +26,19 @@
   --color-cost-cache-write: #b45a1b;
   --color-cost-cache-hit: #5c7370;
   --color-cost-unspecified: #c9c0b4;
+  --home-art-label: var(--color-text-muted);
+  --home-art-teal: var(--color-primary);
+  --home-art-teal-soft: var(--color-cost-input);
+  --home-art-orange: var(--color-cost-cache-write);
+  --home-art-slate: var(--color-info);
+  --home-art-muted: color-mix(in srgb, var(--map-hue-11) 78%, var(--color-surface));
+  --home-art-heat-1: var(--color-primary-soft);
+  --home-art-heat-2: color-mix(in srgb, var(--color-primary) 38%, var(--color-surface));
+  --home-art-heat-3: var(--color-primary);
+  --home-art-heat-4: var(--color-primary-strong);
+  --home-art-grid: var(--color-border-strong);
+  --home-art-shape: color-mix(in srgb, var(--color-primary) 16%, var(--color-surface));
+  --home-art-stroke: var(--color-primary-strong);
   --shadow-header: none;
   /*
    * The discussion map's entity palette.
@@ -96,6 +109,19 @@
   --color-cost-cache-write: #d4894a;
   --color-cost-cache-hit: #8a9c99;
   --color-cost-unspecified: #3d4c48;
+  --home-art-label: var(--color-text-muted);
+  --home-art-teal: var(--color-primary-strong);
+  --home-art-teal-soft: var(--color-cost-output);
+  --home-art-orange: var(--color-cost-cache-write);
+  --home-art-slate: var(--map-hue-4);
+  --home-art-muted: var(--map-hue-11);
+  --home-art-heat-1: color-mix(in srgb, var(--color-primary-strong) 22%, var(--color-surface));
+  --home-art-heat-2: var(--color-cost-input);
+  --home-art-heat-3: var(--color-cost-output);
+  --home-art-heat-4: var(--color-primary-strong);
+  --home-art-grid: var(--color-border-strong);
+  --home-art-shape: color-mix(in srgb, var(--color-primary-strong) 18%, var(--color-surface));
+  --home-art-stroke: var(--color-primary-strong);
   /* Lifted and slightly desaturated so the same hues read against #1c2624. */
   --map-hue-1: #3f9d99;
   --map-hue-2: #d9873f;

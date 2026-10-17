@@ -78,8 +78,8 @@ const makeRow = vi.hoisted(() => {
           price_1m_cache_write_tokens: null,
         },
         performance: {
-          median_output_tokens_per_second: null,
-          median_time_to_first_token_seconds: null,
+        median_output_tokens_per_second: 80,
+        median_time_to_first_token_seconds: 2,
           median_time_to_first_answer_token_seconds: null,
           median_end_to_end_response_time_seconds: null,
         },
@@ -153,40 +153,45 @@ function renderPage() {
 }
 
 describe('PerformanceVsCostPage', () => {
-  it('shows three stacked views and shares hover, pins, and details', async () => {
+  it('keeps one scatter as the entry and shares it with parallel coordinates', async () => {
     const user = userEvent.setup()
     renderPage()
 
-    expect(await screen.findByRole('heading', { name: 'Performance vs. cost' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Parallel coordinates' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Performance explorer' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Performance vs. cost', selected: true })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'AA Intelligence Index' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'AA Coding Index' })).toBeNull()
     const cheap = await screen.findByRole('button', { name: 'Pin Cheap weak' })
-    const labels = ['AA Intelligence Index', 'AA Coding Index', 'LMArena Agent Score']
-    for (const label of labels) expect(screen.getByRole('heading', { name: label })).toBeTruthy()
-
     await user.hover(cheap)
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Cheap weak' })).toBeTruthy()
     })
-    for (const label of labels) expect(screen.getByTestId(label).getAttribute('data-hover')).toBe('cheap-weak')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-hover')).toBe('cheap-weak')
     await user.click(cheap)
-    for (const label of labels) expect(screen.getByTestId(label).getAttribute('data-pinned')).toBe('cheap-weak')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
     expect(screen.getByRole('link', { name: 'Model page' }).getAttribute('href')).toBe('/models/cheap-weak')
-    expect(screen.getByRole('region', { name: 'Pinned model comparison' })).toBeTruthy()
-    expect(new Set(labels.map((label) => screen.getByTestId(label).getAttribute('data-domain'))).size).toBe(1)
+    await user.selectOptions(screen.getByLabelText('Performance'), 'coding')
+    expect(screen.getByRole('heading', { name: 'AA Coding Index' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'AA Intelligence Index' })).toBeNull()
+    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak')
   })
 
-  it('coordinates brushing, including empty brushes, across all views and the model list', async () => {
+  it('restores the three scatter views and coordinates brushing across them', async () => {
     const user = userEvent.setup()
     renderPage()
     await screen.findByRole('button', { name: 'Pin Balanced' })
+    await user.click(screen.getByRole('radio', { name: 'Compare views' }))
+    const labels = ['AA Intelligence Index', 'AA Coding Index', 'LMArena Agent Score']
+    for (const label of labels) expect(screen.getByRole('heading', { name: label })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Brush AA Coding Index' }))
-    for (const label of ['AA Intelligence Index', 'AA Coding Index', 'LMArena Agent Score']) {
-      expect(screen.getByTestId(label).getAttribute('data-brushed')).toBe('mid')
-    }
+    for (const label of labels) expect(screen.getByTestId(label).getAttribute('data-brushed')).toBe('mid')
+    expect(new Set(labels.map((label) => screen.getByTestId(label).getAttribute('data-domain'))).size).toBe(1)
     expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
-    expect(screen.getByRole('status').textContent).toContain('1 models brushed')
+    expect(screen.getByText(/1 models match the scatter brush/)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Empty brush AA Coding Index' }))
     expect(screen.queryByRole('button', { name: 'Pin Balanced' })).toBeNull()
-    expect(screen.getByRole('status').textContent).toContain('0 models brushed')
+    expect(screen.getByText(/0 models match the scatter brush/)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Clear brush' }))
     expect(screen.getByRole('button', { name: 'Pin Cheap weak' })).toBeTruthy()
   })
@@ -202,8 +207,9 @@ describe('PerformanceVsCostPage', () => {
     await user.selectOptions(screen.getByLabelText('Provider'), 'openai')
     expect(screen.queryByRole('button', { name: 'Pin Cheap weak' })).toBeNull()
     expect(screen.getByRole('link', { name: 'Cheap weak' })).toBeTruthy()
-    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak')
-    expect(screen.getByTestId('AA Coding Index').getAttribute('data-scale')).toBe('linear')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-scale')).toBe('linear')
+    await user.click(screen.getByRole('radio', { name: 'Compare views' }))
     await user.click(screen.getByRole('checkbox', { name: 'AA Coding Index' }))
     expect(screen.queryByRole('heading', { name: 'AA Coding Index' })).toBeNull()
     expect(screen.getByRole('heading', { name: 'AA Intelligence Index' })).toBeTruthy()
@@ -216,10 +222,27 @@ describe('PerformanceVsCostPage', () => {
       await user.click(await screen.findByRole('button', { name: `Pin ${name}` }))
     }
     await user.click(screen.getByRole('button', { name: 'Pin Fourth' }))
-    expect(screen.getByRole('status').textContent).toContain('Comparison is full')
-    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak,mid,expensive-weak')
+    expect(screen.getByText(/Comparison is full/)).toBeTruthy()
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak,mid,expensive-weak')
     await user.click(screen.getByRole('button', { name: 'Clear selection' }))
     expect(screen.queryByRole('region', { name: 'Pinned model comparison' })).toBeNull()
-    expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('')
+  })
+
+  it('switches to a speed scatter and keeps pinned models', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByRole('button', { name: 'Pin Cheap weak' }))
+    await user.click(screen.getByRole('tab', { name: 'Performance vs. speed' }))
+    expect(screen.getByRole('heading', { name: 'Output speed (tokens/sec)' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Parallel coordinates' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Rank comparison' })).toBeTruthy()
+    expect(screen.getByText(/a higher position is faster/)).toBeTruthy()
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-scale')).toBe('linear')
+    await user.selectOptions(screen.getByLabelText('Speed measure'), 'ttft')
+    expect(screen.getByRole('heading', { name: 'Time to first token (seconds)' })).toBeTruthy()
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-scale')).toBe('log')
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
   })
 })

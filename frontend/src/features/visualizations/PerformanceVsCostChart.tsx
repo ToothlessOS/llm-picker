@@ -21,6 +21,10 @@ export interface PerformanceVsCostChartProps {
   brushedKeys?: readonly string[] | null
   brushMode?: boolean
   brushReset?: number
+  /** `lower` shades the fast-or-cheap side on the left. `higher` shades the right. */
+  xBetter?: 'lower' | 'higher'
+  formatX?: (value: number) => string
+  showScale?: boolean
   onHover?: (key: string | null) => void
   onSelect?: (key: string) => void
   onBrush?: (keys: string[] | null) => void
@@ -29,7 +33,8 @@ export interface PerformanceVsCostChartProps {
 export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
   const { model, variant, scoreLabel = 'Intelligence index',
     costLabel = 'Cost per task, USD', costScale = 'log', xDomain,
-    providers, brushMode = false, brushReset = 0 } = props
+    providers, brushMode = false, brushReset = 0, xBetter = 'lower',
+    formatX = formatAxisCurrency, showScale = true } = props
   const wrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const propsRef = useRef(props)
@@ -73,10 +78,16 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
       svg.attr('viewBox', `0 0 ${width} ${height}`)
       const plot = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`)
       if (model.points.length) {
-        plot.append('rect').attr('class', 'pareto-quadrant')
-          .attr('width', Math.max(0, x(model.medianCost)))
+        const medianX = x(model.medianCost)
+        const quadrant = plot.append('rect').attr('class', 'pareto-quadrant')
+          .attr('y', 0)
           .attr('height', Math.max(0, y(model.medianIntelligence)))
           .attr('fill', primary).attr('fill-opacity', 0.08)
+        if (xBetter === 'higher') {
+          quadrant.attr('x', medianX).attr('width', Math.max(0, w - medianX))
+        } else {
+          quadrant.attr('x', 0).attr('width', Math.max(0, medianX))
+        }
       }
       const xTicks = costScale === 'log' ? x.ticks(7).filter((value) => {
         const significant = value / 10 ** Math.floor(Math.log10(value))
@@ -86,7 +97,7 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
       plot.append('g').selectAll('line').data(yTicks).join('line')
         .attr('x2', w).attr('y1', y).attr('y2', y).attr('stroke', border)
       const xAxis = plot.append('g').attr('transform', `translate(0,${h})`)
-        .call(axisBottom(x).tickValues(xTicks).tickFormat((value) => formatAxisCurrency(Number(value))).tickSizeOuter(0))
+        .call(axisBottom(x).tickValues(xTicks).tickFormat((value) => formatX(Number(value))).tickSizeOuter(0))
       const yAxis = plot.append('g').call(axisLeft(y).tickValues(yTicks).tickFormat((value) =>
         new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(Number(value)),
       ).tickSizeOuter(0))
@@ -96,7 +107,7 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
       }
       plot.append('text').attr('class', 'pareto-axis-title').attr('x', w / 2).attr('y', h + 40)
         .attr('text-anchor', 'middle').attr('fill', muted).attr('font-size', 10)
-        .text(`${costLabel} (${costScale === 'log' ? 'log' : 'linear'})`)
+        .text(showScale ? `${costLabel} (${costScale === 'log' ? 'log' : 'linear'})` : costLabel)
       if (interactive) {
         plot.append('text').attr('transform', 'rotate(-90)').attr('x', -h / 2).attr('y', -54)
           .attr('text-anchor', 'middle').attr('fill', muted).attr('font-size', 10).text(scoreLabel)
@@ -112,7 +123,7 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
         .attr('r', (point) => point.onPareto ? 6.5 : 4.5)
         .attr('fill', (point) => interactive ? providerColor(point.providerKey, providerKeys) : primary)
         .attr('stroke', (point) => point.onPareto ? text : surface).attr('stroke-width', 1.5)
-      dots.append('title').text((point) => `${point.name}: ${point.intelligence}; ${formatAxisCurrency(point.cost)}`)
+      dots.append('title').text((point) => `${point.name}: ${point.intelligence}; ${formatX(point.cost)}`)
       const focusLabels = plot.append('g').attr('class', 'pareto-focus-labels')
       const nearest = Delaunay.from(model.points, (point) => x(point.cost), (point) => y(point.intelligence))
       const nearestKey = (event: MouseEvent) => {
@@ -149,10 +160,11 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
         dots.each(function (point) {
           const node = select(this)
           const active = point.key === hoverKey || selected.has(point.key)
-          const mutedPoint = !active && ((hoverKey != null) ||
-            (brushed !== null && !brushed.has(point.key)) ||
+          const matched = brushed !== null && brushed.has(point.key)
+          const mutedPoint = !active && !matched && ((hoverKey != null) ||
+            brushed !== null ||
             (pinnedProvider !== null && point.providerKey !== pinnedProvider) ||
-            (selected.size > 0 && brushed === null))
+            selected.size > 0)
           node.classed('is-muted', mutedPoint).classed('is-active', active)
             .classed('is-pinned', selected.has(point.key))
             .attr('r', active ? 8 : point.onPareto ? 6.5 : 4.5)
@@ -184,7 +196,7 @@ export function PerformanceVsCostChart(props: PerformanceVsCostChartProps) {
     const themes = new MutationObserver(render)
     themes.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
     return () => { observer.disconnect(); themes.disconnect() }
-  }, [model, variant, scoreLabel, costLabel, costScale, xDomain, providers, brushMode, brushReset])
+  }, [model, variant, scoreLabel, costLabel, costScale, xDomain, providers, brushMode, brushReset, xBetter, formatX, showScale])
 
   useLayoutEffect(() => {
     const svg = svgRef.current

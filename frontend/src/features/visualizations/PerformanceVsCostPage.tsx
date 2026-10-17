@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, MousePointer2, Pin, RotateCcw, SquareDashedMousePointer, X } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 
@@ -8,51 +8,108 @@ import { PageHeader } from '../../components/PageHeader'
 import { EmptyState } from '../../components/states/EmptyState'
 import { ErrorState } from '../../components/states/ErrorState'
 import { LoadingState } from '../../components/states/LoadingState'
+import { ParallelCoordinatesChart } from './ParallelCoordinatesChart'
 import { PerformanceVsCostChart } from './PerformanceVsCostChart'
+import { RankBumpChart } from './RankBumpChart'
 import { providerColor, providerLabel } from './scatter'
 import {
-  buildPerformanceComparison, COST_LABELS, costValue, formatPerformance,
-  PERFORMANCE_LABELS, PERFORMANCE_METRICS, performanceValue, toggleComparedModel,
-  type CostMetric, type CostScale, type PerformanceMetric,
+  buildParallelRecords, buildPerformanceComparison, combineBrushes, COMPARE_STROKES,
+  COST_LABELS, costValue, formatPerformance, keysMatchingAxisBrushes, metricRanks,
+  PARALLEL_AXIS_LABELS, PARALLEL_AXES, PERFORMANCE_LABELS, PERFORMANCE_METRICS, SPEED_PARALLEL_AXES,
+  performanceValue, toggleComparedModel,
+  type AxisBrushes, type CostMetric, type CostScale, type ParallelAxis, type PerformanceMetric,
 } from './performanceComparison'
+import {
+  buildSpeedComparison, buildSpeedParallelRecords, formatSpeed, SPEED_LABELS, SPEED_METRICS, speedValue,
+  type SpeedMetric,
+} from './speedComparison'
 import { useOverviewPerformance } from './useOverviewScatter'
 
 export function PerformanceVsCostPage() {
   const location = useLocation()
   const query = useOverviewPerformance()
+  const [explorer, setExplorer] = useState<'cost' | 'speed'>('cost')
+  const [speedMetric, setSpeedMetric] = useState<SpeedMetric>('output')
   const [costMetric, setCostMetric] = useState<CostMetric>('task')
   const [costScale, setCostScale] = useState<CostScale>('log')
   const [provider, setProvider] = useState<string | null>(null)
+  const [layout, setLayout] = useState<'focus' | 'compare'>('focus')
+  const [metric, setMetric] = useState<PerformanceMetric>('intelligence')
   const [views, setViews] = useState<PerformanceMetric[]>([...PERFORMANCE_METRICS])
   const [hoverKey, setHoverKey] = useState<string | null>(null)
   const [inspectedKey, setInspectedKey] = useState<string | null>(null)
   const [pinnedKeys, setPinnedKeys] = useState<string[]>([])
-  const [brushedKeys, setBrushedKeys] = useState<string[] | null>(null)
+  const [scatterBrushKeys, setScatterBrushKeys] = useState<string[] | null>(null)
+  const [axisBrushes, setAxisBrushes] = useState<AxisBrushes>({})
   const [brushSource, setBrushSource] = useState<PerformanceMetric | null>(null)
   const [brushMode, setBrushMode] = useState(false)
-  const [brushReset, setBrushReset] = useState(0)
+  const [scatterBrushReset, setScatterBrushReset] = useState(0)
+  const [parallelBrushReset, setParallelBrushReset] = useState(0)
   const [viewBrushResets, setViewBrushResets] = useState({ intelligence: 0, coding: 0, agent: 0 })
   const [message, setMessage] = useState('')
   const rows = query.data?.results
   const comparison = useMemo(() =>
     buildPerformanceComparison(rows ?? [], costMetric, costScale, provider),
   [rows, costMetric, costScale, provider])
+  const speedComparison = useMemo(() =>
+    buildSpeedComparison(rows ?? [], metric, speedMetric, provider),
+  [rows, metric, speedMetric, provider])
+  const formatSpeedAxis = useCallback((value: number) =>
+    new Intl.NumberFormat(undefined, { maximumFractionDigits: speedMetric === 'output' ? 0 : 1 }).format(value),
+  [speedMetric])
   const providers = useMemo(() => [...new Set((rows ?? []).map((row) =>
     row.model.organization ?? 'unknown',
   ))].sort(), [rows])
   const inspected = rows?.find((row) => row.model.key === (hoverKey ?? inspectedKey ?? pinnedKeys.at(-1)))
   const pinnedRows = pinnedKeys.map((key) => rows?.find((row) => row.model.key === key))
     .filter((row): row is OverviewRow => row !== undefined)
-  const visibleKeys = useMemo(() => new Set(PERFORMANCE_METRICS.flatMap((metric) =>
-    comparison.models[metric].points.map((point) => point.key),
+  const records = useMemo(() => buildParallelRecords(comparison.rows, costMetric, costScale),
+    [comparison.rows, costMetric, costScale])
+  const speedRecords = useMemo(() => buildSpeedParallelRecords(comparison.rows, speedMetric),
+    [comparison.rows, speedMetric])
+  const parallelKeys = useMemo(() => keysMatchingAxisBrushes(records, axisBrushes), [records, axisBrushes])
+  const brushedKeys = useMemo(() => combineBrushes(parallelKeys, scatterBrushKeys), [parallelKeys, scatterBrushKeys])
+  const ranks = useMemo(() => Object.fromEntries(PERFORMANCE_METRICS.map((item) =>
+    [item, metricRanks(comparison.rows, item)])) as Record<PerformanceMetric, Map<string, number>>, [comparison.rows])
+  const visibleKeys = useMemo(() => new Set(PERFORMANCE_METRICS.flatMap((item) =>
+    comparison.models[item].points.map((point) => point.key),
   )), [comparison])
-  const listedRows = comparison.rows.filter((row) => visibleKeys.has(row.model.key) &&
-    (brushedKeys === null || brushedKeys.includes(row.model.key)))
+  const activeAxes = (explorer === 'speed' ? SPEED_PARALLEL_AXES : PARALLEL_AXES)
+    .filter((axis) => axisBrushes[axis] !== undefined)
+  const listedRows = comparison.rows.filter((row) => {
+    const plotted = explorer === 'speed'
+      ? speedComparison.points.some((point) => point.key === row.model.key)
+      : visibleKeys.has(row.model.key)
+    if (brushedKeys === null) return plotted
+    return plotted && brushedKeys.includes(row.model.key)
+  })
+  const activeMetrics = layout === 'focus' ? [metric] : PERFORMANCE_METRICS.filter((item) => views.includes(item))
+  const rankSeries = pinnedRows.map((row) => ({
+    key: row.model.key,
+    name: row.model.name,
+    ranks: Object.fromEntries(PERFORMANCE_METRICS.flatMap((item) => {
+      const rank = ranks[item].get(row.model.key)
+      return rank === undefined ? [] : [[item, rank]]
+    })) as Partial<Record<PerformanceMetric, number>>,
+  }))
 
   const clearBrush = () => {
-    setBrushedKeys(null)
+    setScatterBrushKeys(null)
+    setAxisBrushes({})
     setBrushSource(null)
-    setBrushReset((value) => value + 1)
+    setScatterBrushReset((value) => value + 1)
+    setParallelBrushReset((value) => value + 1)
+  }
+  const brushAxis = (axis: ParallelAxis, range: readonly [number, number] | null) => {
+    setScatterBrushKeys(null)
+    setBrushSource(null)
+    setScatterBrushReset((value) => value + 1)
+    setAxisBrushes((current) => {
+      const next = { ...current }
+      if (range === null) delete next[axis]
+      else next[axis] = range
+      return next
+    })
   }
   const inspect = (key: string | null) => {
     setHoverKey(key)
@@ -83,24 +140,39 @@ export function PerformanceVsCostPage() {
       <Link className="back-link" to={{ pathname: '/', search: location.search, hash: 'visualizations' }}>
         <ArrowLeft aria-hidden="true" size={16} />All charts
       </Link>
-      <PageHeader title="Performance vs. cost" count={rows?.length}
+      <PageHeader title="Performance explorer" count={rows?.length}
         isFetching={query.isFetching && !query.isPending}
-        description="Capability and task performance against a common cost reference. Each view retains its original score and its own Pareto frontier." />
+        description={explorer === 'cost'
+          ? 'Compare capability with cost, then test several conditions at once.'
+          : 'Compare capability with speed. Faster output and a shorter wait for the first token are separate questions.'} />
       {query.isPending ? <LoadingState label="Loading performance versus cost" rows={5} /> : null}
       {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
       {rows?.length === 0 ? <EmptyState message="No matched models are available." /> : null}
 
       {rows && rows.length > 0 ? <>
+        <div className="performance-explorer" role="tablist" aria-label="Performance explorer views">
+          <button type="button" role="tab" aria-selected={explorer === 'cost'}
+            onClick={() => { setExplorer('cost'); clearBrush(); setHoverKey(null) }}>Performance vs. cost</button>
+          <button type="button" role="tab" aria-selected={explorer === 'speed'}
+            onClick={() => { setExplorer('speed'); clearBrush(); setHoverKey(null) }}>Performance vs. speed</button>
+        </div>
         <section className="performance-controls" aria-label="Comparison controls">
-          <label className="performance-control performance-control--cost">
+          {explorer === 'cost' ? <label className="performance-control performance-control--cost">
             <span>Cost reference</span>
             <select value={costMetric} onChange={(event) => { setCostMetric(event.target.value as CostMetric); clearBrush() }}>
               <option value="task">AA cost / Intelligence Index task</option>
               <option value="input">Input price / million tokens</option>
               <option value="output">Output price / million tokens</option>
             </select>
-          </label>
-          <fieldset className="performance-control">
+          </label> : <label className="performance-control performance-control--cost">
+            <span>Speed measure</span>
+            <select aria-label="Speed measure" value={speedMetric} onChange={(event) => {
+              setSpeedMetric(event.target.value as SpeedMetric); clearBrush(); setHoverKey(null)
+            }}>
+              {SPEED_METRICS.map((item) => <option key={item} value={item}>{SPEED_LABELS[item]}</option>)}
+            </select>
+          </label>}
+          {explorer === 'cost' ? <fieldset className="performance-control">
             <legend>Cost scale</legend>
             <div className="performance-segmented">
               {(['log', 'linear'] as const).map((scale) => <label key={scale}>
@@ -109,7 +181,25 @@ export function PerformanceVsCostPage() {
                 <span>{scale === 'log' ? 'Log' : 'Linear'}</span>
               </label>)}
             </div>
-          </fieldset>
+          </fieldset> : null}
+          {explorer === 'speed' || layout === 'focus' ? <label className="performance-control">
+            <span>Performance</span>
+            <select aria-label="Performance" value={metric} onChange={(event) => {
+              setMetric(event.target.value as PerformanceMetric); clearBrush(); setHoverKey(null)
+            }}>
+              {PERFORMANCE_METRICS.map((item) => <option key={item} value={item}>{PERFORMANCE_LABELS[item]}</option>)}
+            </select>
+          </label> : null}
+          {explorer === 'cost' ? <fieldset className="performance-control">
+            <legend>Layout</legend>
+            <div className="performance-segmented">
+              {([['focus', 'Single view'], ['compare', 'Compare views']] as const).map(([value, label]) => <label key={value}>
+                <input type="radio" name="performance-layout" value={value} checked={layout === value}
+                  onChange={() => { setLayout(value); clearBrush(); setHoverKey(null) }} />
+                <span>{label}</span>
+              </label>)}
+            </div>
+          </fieldset> : null}
           <label className="performance-control">
             <span>Provider</span>
             <select value={provider ?? ''} onChange={(event) => {
@@ -130,22 +220,29 @@ export function PerformanceVsCostPage() {
           </div>
         </section>
         <div className="performance-view-bar">
-          <fieldset className="performance-views"><legend>Views</legend>
-            {PERFORMANCE_METRICS.map((metric) => <label key={metric}>
-              <input type="checkbox" checked={views.includes(metric)} onChange={() => toggleView(metric)} />
-              {PERFORMANCE_LABELS[metric]}
+          {explorer === 'cost' && layout === 'compare' ? <fieldset className="performance-views"><legend>Views</legend>
+            {PERFORMANCE_METRICS.map((item) => <label key={item}>
+              <input type="checkbox" checked={views.includes(item)} onChange={() => toggleView(item)} />
+              {PERFORMANCE_LABELS[item]}
             </label>)}
-          </fieldset>
+          </fieldset> : <p className="performance-cost-note performance-cost-note--inline">{explorer === 'cost'
+            ? 'Drag a band on a parallel axis to keep models inside that range. Bands on several axes are combined with AND.'
+            : 'Output speed is better farther right. Time to first token is better farther left. Drag a band on a parallel axis to keep models inside that range.'}</p>}
           <p className="performance-status" role="status">
-            {message || (brushedKeys !== null ? `${brushedKeys.length} models brushed` : `${visibleKeys.size} models with measured cost`)}
+            {message || (brushedKeys !== null
+              ? `${brushedKeys.length} models match ${activeAxes.length ? activeAxes.map((axis) => PARALLEL_AXIS_LABELS[axis]).join(' and ') : 'the scatter brush'}`
+              : explorer === 'speed'
+                ? `${speedComparison.points.length} models with measured ${speedMetric === 'output' ? 'output speed' : 'latency'}`
+                : `${visibleKeys.size} models with measured cost`)}
             <span>{pinnedKeys.length} / 3 pinned</span>
             {brushedKeys !== null ? <button type="button" title="Clear brush" aria-label="Clear brush" onClick={clearBrush}><X size={14} /></button> : null}
           </p>
         </div>
-        <p className="performance-cost-note">{costMetric === 'task'
+        {explorer === 'cost' ? <p className="performance-cost-note">{costMetric === 'task'
           ? 'Cost is the AA Intelligence Index workload estimate, not a measured cost for Coding or LMArena Agent tasks.'
           : 'Token prices are AA list prices; they do not include model-specific token usage.'}
           {costScale === 'log' ? ' Zero and missing costs are omitted on the log axis.' : ' Missing costs are omitted; measured zero prices are included.'}</p>
+          : <p className="performance-cost-note">Both speed numbers are Artificial Analysis medians. Time to first token uses a log axis because the measured waits span from about one second to several minutes.</p>}
 
         {pinnedRows.length ? <section className="performance-comparison" aria-label="Pinned model comparison">
           <div className="performance-table-scroll"><table>
@@ -154,7 +251,7 @@ export function PerformanceVsCostPage() {
                 <button type="button" title={`Unpin ${row.model.name}`} aria-label={`Unpin ${row.model.name}`} onClick={() => togglePin(row.model.key)}><X size={14} /></button></div>
             </th>)}</tr></thead>
             <tbody>
-              <tr><th scope="row">{COST_LABELS[costMetric]}</th>{pinnedRows.map((row) => <td key={row.model.key}>{formatCurrency(costValue(row, costMetric), 4)}</td>)}</tr>
+              <tr><th scope="row">{explorer === 'speed' ? SPEED_LABELS[speedMetric] : COST_LABELS[costMetric]}</th>{pinnedRows.map((row) => <td key={row.model.key}>{explorer === 'speed' ? formatSpeed(speedValue(row, speedMetric), speedMetric) : formatCurrency(costValue(row, costMetric), 4)}</td>)}</tr>
               {PERFORMANCE_METRICS.map((metric) => <tr key={metric}><th scope="row">{PERFORMANCE_LABELS[metric]}</th>
                 {pinnedRows.map((row) => <td key={row.model.key}>{formatPerformance(performanceValue(row, metric), metric)}</td>)}
               </tr>)}
@@ -163,41 +260,134 @@ export function PerformanceVsCostPage() {
         </section> : null}
 
         <div className="performance-layout">
-          <div className="performance-stack">
-            {PERFORMANCE_METRICS.filter((metric) => views.includes(metric)).map((metric, index) => {
-              const model = comparison.models[metric]
-              return <section className="performance-panel" key={metric} aria-labelledby={`performance-${metric}-heading`}>
-                <header><div><span className="performance-panel__number">0{index + 1}</span>
-                  <h2 id={`performance-${metric}-heading`}>{PERFORMANCE_LABELS[metric]}</h2></div>
-                  <span>{model.points.length} plotted / {model.omitted} omitted</span></header>
-                {model.points.length ? <>
-                  <div className="performance-chart-frame"><PerformanceVsCostChart model={model} variant="interactive"
-                    scoreLabel={PERFORMANCE_LABELS[metric]} costLabel={costMetric === 'task' ? 'AA cost / Intelligence task (USD)' : COST_LABELS[costMetric]}
-                    costScale={costScale} xDomain={comparison.xDomain} providers={providers}
-                    hoverKey={hoverKey} pinnedKeys={pinnedKeys} brushedKeys={brushedKeys}
-                    onHover={inspect} onSelect={togglePin} brushMode={brushMode}
-                    brushReset={brushReset + viewBrushResets[metric]}
-                    onBrush={(keys) => {
-                      setBrushedKeys(keys)
-                      if (brushSource !== metric) setViewBrushResets((current) => ({
-                        intelligence: current.intelligence + (metric === 'intelligence' ? 0 : 1),
-                        coding: current.coding + (metric === 'coding' ? 0 : 1),
-                        agent: current.agent + (metric === 'agent' ? 0 : 1),
-                      }))
-                      setBrushSource(keys === null ? null : metric)
-                    }} />
+          <div className="performance-main">
+            {explorer === 'speed' ? <div className="performance-stage">
+              <div className="performance-stack">
+                <section className="performance-panel" aria-labelledby="speed-heading">
+                  <header><div><h2 id="speed-heading">{SPEED_LABELS[speedMetric]}</h2></div>
+                    <span>{speedComparison.points.length} plotted / {speedComparison.omitted} omitted</span></header>
+                  {speedComparison.points.length ? <>
+                    <div className="performance-chart-frame"><PerformanceVsCostChart model={speedComparison} variant="interactive"
+                      scoreLabel={PERFORMANCE_LABELS[metric]} costLabel={SPEED_LABELS[speedMetric]}
+                      costScale={speedMetric === 'ttft' ? 'log' : 'linear'} xDomain={speedComparison.xDomain}
+                      providers={providers} hoverKey={hoverKey} pinnedKeys={pinnedKeys}
+                      brushedKeys={brushedKeys} onHover={inspect} onSelect={togglePin}
+                      brushMode={brushMode} brushReset={scatterBrushReset}
+                      xBetter={speedMetric === 'output' ? 'higher' : 'lower'} showScale={false}
+                      formatX={formatSpeedAxis}
+                      onBrush={(keys) => {
+                        setAxisBrushes({})
+                        setParallelBrushReset((value) => value + 1)
+                        setScatterBrushKeys(keys)
+                        setBrushSource(null)
+                      }} />
+                    </div>
+                    <div className="performance-frontier" aria-label="Speed Pareto front">
+                      <span className="performance-frontier__label">Pareto front</span>
+                      {speedComparison.pareto.map((point) => <button key={point.key} type="button"
+                        aria-pressed={pinnedKeys.includes(point.key)} onClick={() => togglePin(point.key)}
+                        onPointerEnter={() => inspect(point.key)} onPointerLeave={() => setHoverKey(null)}
+                        onFocus={() => inspect(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
+                    </div>
+                  </> : <EmptyState message={`No measured ${PERFORMANCE_LABELS[metric]} and ${SPEED_LABELS[speedMetric]} pairs for this selection.`} />}
+                </section>
+              </div>
+              <section className="performance-panel performance-panel--parallel" aria-labelledby="parallel-heading">
+                <header>
+                  <div>
+                    <h2 id="parallel-heading">Parallel coordinates</h2>
+                    {pinnedRows.length ? <ul className="performance-pin-legend">
+                      {pinnedRows.map((row, index) => <li key={row.model.key}>
+                        <span style={{ background: COMPARE_STROKES[index] }} />{row.model.name}
+                      </li>)}
+                    </ul> : null}
                   </div>
-                  <div className="performance-frontier" aria-label={`${PERFORMANCE_LABELS[metric]} Pareto front`}>
-                    <span className="performance-frontier__label">Pareto front</span>
-                    {model.pareto.map((point) => <button key={point.key} type="button"
-                      aria-pressed={pinnedKeys.includes(point.key)} onClick={() => togglePin(point.key)}
-                      onPointerEnter={() => inspect(point.key)} onPointerLeave={() => setHoverKey(null)}
-                      onFocus={() => inspect(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
-                  </div>
-                </> : <EmptyState message={`No measured ${PERFORMANCE_LABELS[metric]} and cost pairs for this selection.`} />}
+                  <span>Cohort in gray</span>
+                </header>
+                <p className="performance-axis-note">Each axis keeps its own scale. Performance points upward. Speed is oriented so a higher position is faster.</p>
+                <div className="performance-chart-frame">
+                  <ParallelCoordinatesChart records={speedRecords} axes={SPEED_PARALLEL_AXES}
+                    costScale={speedMetric === 'ttft' ? 'log' : 'linear'} costDomain={speedComparison.xDomain}
+                    costLabel={SPEED_LABELS[speedMetric]} lowerIsBetter={speedMetric === 'ttft'}
+                    formatLead={formatSpeedAxis}
+                    leadTitle={speedMetric === 'output' ? 'Output speed' : 'TTFT'} leadHint="faster ↑"
+                    hoverKey={hoverKey} pinnedKeys={pinnedKeys}
+                    brushedKeys={brushedKeys} brushReset={parallelBrushReset}
+                    onHover={inspect} onSelect={togglePin} onAxisBrush={brushAxis} />
+                </div>
               </section>
-            })}
-            {!views.length ? <EmptyState message="No views selected." /> : null}
+            </div> : <>
+            <div className={`performance-stage${layout === 'compare' ? ' performance-stage--compare' : ''}`}>
+              <div className="performance-stack">
+                {activeMetrics.map((item, index) => {
+                  const model = comparison.models[item]
+                  return <section className="performance-panel" key={item} aria-labelledby={`performance-${item}-heading`}>
+                    <header><div>{layout === 'compare' ? <span className="performance-panel__number">0{index + 1}</span> : null}
+                      <h2 id={`performance-${item}-heading`}>{PERFORMANCE_LABELS[item]}</h2></div>
+                      <span>{model.points.length} plotted / {model.omitted} omitted</span></header>
+                    {model.points.length ? <>
+                      <div className="performance-chart-frame"><PerformanceVsCostChart model={model} variant="interactive"
+                        scoreLabel={PERFORMANCE_LABELS[item]} costLabel={costMetric === 'task' ? 'AA cost / Intelligence task (USD)' : COST_LABELS[costMetric]}
+                        costScale={costScale} xDomain={comparison.xDomain} providers={providers}
+                        hoverKey={hoverKey} pinnedKeys={pinnedKeys} brushedKeys={brushedKeys}
+                        onHover={inspect} onSelect={togglePin} brushMode={brushMode}
+                        brushReset={scatterBrushReset + viewBrushResets[item]}
+                        onBrush={(keys) => {
+                          setAxisBrushes({})
+                          setParallelBrushReset((value) => value + 1)
+                          setScatterBrushKeys(keys)
+                          if (brushSource !== item) setViewBrushResets((current) => ({
+                            intelligence: current.intelligence + (item === 'intelligence' ? 0 : 1),
+                            coding: current.coding + (item === 'coding' ? 0 : 1),
+                            agent: current.agent + (item === 'agent' ? 0 : 1),
+                          }))
+                          setBrushSource(keys === null ? null : item)
+                        }} />
+                      </div>
+                      <div className="performance-frontier" aria-label={`${PERFORMANCE_LABELS[item]} Pareto front`}>
+                        <span className="performance-frontier__label">Pareto front</span>
+                        {model.pareto.map((point) => <button key={point.key} type="button"
+                          aria-pressed={pinnedKeys.includes(point.key)} onClick={() => togglePin(point.key)}
+                          onPointerEnter={() => inspect(point.key)} onPointerLeave={() => setHoverKey(null)}
+                          onFocus={() => inspect(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
+                      </div>
+                    </> : <EmptyState message={`No measured ${PERFORMANCE_LABELS[item]} and cost pairs for this selection.`} />}
+                  </section>
+                })}
+                {!activeMetrics.length ? <EmptyState message="No views selected." /> : null}
+              </div>
+              <section className="performance-panel performance-panel--parallel" aria-labelledby="parallel-heading">
+                <header>
+                  <div>
+                    <h2 id="parallel-heading">Parallel coordinates</h2>
+                    {pinnedRows.length ? <ul className="performance-pin-legend">
+                      {pinnedRows.map((row, index) => <li key={row.model.key}>
+                        <span style={{ background: COMPARE_STROKES[index] }} />{row.model.name}
+                      </li>)}
+                    </ul> : null}
+                  </div>
+                  <span>Cohort in gray</span>
+                </header>
+                <p className="performance-axis-note">Each axis keeps its own scale. Performance points upward. Cost is reversed, so a higher position is cheaper.</p>
+                <div className="performance-chart-frame">
+                  <ParallelCoordinatesChart records={records} costScale={costScale} costDomain={comparison.xDomain}
+                    costLabel={COST_LABELS[costMetric]} hoverKey={hoverKey} pinnedKeys={pinnedKeys}
+                    brushedKeys={brushedKeys} brushReset={parallelBrushReset}
+                    onHover={inspect} onSelect={togglePin} onAxisBrush={brushAxis} />
+                </div>
+              </section>
+            </div>
+            </>}
+            <section className="performance-panel" aria-labelledby="rank-heading">
+              <header>
+                <div><h2 id="rank-heading">Rank comparison</h2></div>
+                <span>Rank 1 is best</span>
+              </header>
+              <p className="performance-axis-note">Ranks are computed inside the current provider filter. Ties share a rank. This compares order, not the size of the score gap.</p>
+              {rankSeries.length ? <div className="performance-chart-frame performance-chart-frame--short">
+                <RankBumpChart series={rankSeries} cohortSize={comparison.rows.length} />
+              </div> : <EmptyState title="Pin models to compare ranks" message="Pin two or three models to see how their ranks change across Intelligence, Coding, and Agent." />}
+            </section>
           </div>
 
           <aside className="performance-aside">
@@ -207,7 +397,13 @@ export function PerformanceVsCostPage() {
               {inspected ? <>
                 {!comparison.rows.some((row) => row.model.key === inspected.model.key) ? <p className="performance-muted">Outside the current provider filter.</p> : null}
                 <dl>
-                  <div><dt>{COST_LABELS[costMetric]}</dt><dd>{formatCurrency(costValue(inspected, costMetric), 4)}</dd></div>
+                  <div><dt>{explorer === 'speed' ? SPEED_LABELS[speedMetric] : COST_LABELS[costMetric]}</dt>
+                    <dd>{explorer === 'speed'
+                      ? formatSpeed(speedValue(inspected, speedMetric), speedMetric)
+                      : formatCurrency(costValue(inspected, costMetric), 4)}
+                      {explorer === 'speed' ? <small>{speedComparison.pareto.some((point) => point.key === inspected.model.key)
+                        ? 'On Pareto front' : speedComparison.points.some((point) => point.key === inspected.model.key)
+                          ? 'Off Pareto front' : 'Not plotted in current cohort'}</small> : null}</dd></div>
                   {PERFORMANCE_METRICS.map((metric) => <div key={metric}>
                     <dt>{PERFORMANCE_LABELS[metric]}</dt><dd>{formatPerformance(performanceValue(inspected, metric), metric)}
                       <small>{comparison.models[metric].points.some((point) => point.key === inspected.model.key)
@@ -244,7 +440,9 @@ export function PerformanceVsCostPage() {
             </section>
           </aside>
         </div>
-        <p className="performance-source-note">Sources: Artificial Analysis and LMArena. Dashed lines mark each view's Pareto frontier within the current provider cohort. Shaded regions are below median cost and above median performance. Brushing highlights models without changing the reference cohort.</p>
+        <p className="performance-source-note">{explorer === 'cost'
+          ? 'Sources: Artificial Analysis and LMArena. The dashed line is the Pareto front for the selected performance score. The shaded region is below median cost and above median performance. Brushing highlights models without changing that reference cohort.'
+          : 'Source: Artificial Analysis medians. The dashed line marks models that no other plotted model is both faster and more capable than. The shaded region is the fast, high-scoring side of the medians. Pins stay when you switch back to cost.'}</p>
       </> : null}
     </main>
   )

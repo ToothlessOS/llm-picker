@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { OverviewRow } from '../../api'
 import {
-  buildPerformanceComparison, keysInScatterBounds, toggleComparedModel,
+  buildParallelRecords, buildPerformanceComparison, combineBrushes, keysInScatterBounds,
+  keysMatchingAxisBrushes, metricRanks, toggleComparedModel,
 } from './performanceComparison'
 
 function row(key: string, cost: number | null, intelligence: number | null,
@@ -70,5 +71,30 @@ describe('coordinated performance comparison', () => {
   it('keeps existing pins when the three-model limit is reached', () => {
     expect(toggleComparedModel(['a', 'b', 'c'], 'd')).toEqual(['a', 'b', 'c'])
     expect(toggleComparedModel(['a', 'b', 'c'], 'b')).toEqual(['a', 'c'])
+  })
+
+  it('intersects axis brushes and drops models that are missing a brushed value', () => {
+    const records = buildParallelRecords([
+      row('cheap-coder', 0.2, 40, 90, 0.1),
+      row('costly-coder', 3, 80, 95, -0.2),
+      row('cheap-general', 0.3, 70, 20, 0.4),
+      row('unmeasured', 0.1, 50, null, 0.2),
+    ], 'task', 'log')
+    expect(keysMatchingAxisBrushes(records, {})).toBeNull()
+    expect(keysMatchingAxisBrushes(records, { coding: [80, 100] })).toEqual(['cheap-coder', 'costly-coder'])
+    expect(keysMatchingAxisBrushes(records, { coding: [80, 100], cost: [0.1, 0.5] })).toEqual(['cheap-coder'])
+    expect(keysMatchingAxisBrushes(records, { coding: [80, 100], agent: [-0.3, 0] })).toEqual(['costly-coder'])
+    expect(combineBrushes(['cheap-coder', 'costly-coder'], ['costly-coder'])).toEqual(['costly-coder'])
+    expect(combineBrushes(null, ['costly-coder'])).toEqual(['costly-coder'])
+  })
+
+  it('ranks each performance metric independently, with rank 1 as the best score', () => {
+    const rows = [row('low', 1, 10, 90, -0.4), row('mid', 1, 20, 90, 0.2), row('high', 1, 30, 10, 0.2)]
+    expect(metricRanks(rows, 'intelligence').get('high')).toBe(1)
+    expect(metricRanks(rows, 'coding').get('low')).toBe(1)
+    expect(metricRanks(rows, 'coding').get('mid')).toBe(1)
+    expect(metricRanks(rows, 'coding').get('high')).toBe(3)
+    expect(metricRanks(rows, 'agent').has('low')).toBe(true)
+    expect(metricRanks([row('missing', 1, null, null, null)], 'intelligence').size).toBe(0)
   })
 })
