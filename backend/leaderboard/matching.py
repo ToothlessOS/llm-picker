@@ -35,6 +35,7 @@ from .normalization import (
     harness_fold,
     has_effort_marker,
     normalize_model_key,
+    strip_fallback_annotation,
 )
 
 MatchStatus = Literal["matched", "unmatched", "ambiguous", "missing_identity"]
@@ -299,8 +300,17 @@ def match_aa_model(
     is strictly *more* specific than the record's slug. It is therefore
     structurally unable to land on a different effort level, which is why it
     needs none of the sibling shadowing check ``MatchIndex.folded`` requires.
+
+    Before any of that, AA's trailing fallback annotation is removed from the
+    name (``"Claude Opus 5.5 (Max, Default Fallback)"`` -> ``"Claude Opus 5.5
+    (Max)"``). It is routing provenance, not identity, and LMArena names the same
+    row without it. Removing it does two things: the exact-name rung can resolve
+    the record, and `has_effort_marker` now sees the stated effort, which closes
+    the bare-slug rung -- the safe direction. The alias table is still consulted
+    on the verbatim spelling, because that is what the unmatched report shows.
     """
-    name_key = normalize_model_key(name)
+    matching_name = strip_fallback_annotation(name)
+    name_key = normalize_model_key(matching_name)
     slug_key = normalize_model_key(slug)
     if not name_key and not slug_key:
         return MatchOutcome("missing_identity", detail={"name": name, "slug": slug})
@@ -348,7 +358,7 @@ def match_aa_model(
     # Rung: AA's slug with the effort level its name states appended. For the
     # verbose prose dialect, where AA maps the stated level to the bare slug and
     # LMArena keys it with a suffix.
-    effort = effort_from_name(name)
+    effort = effort_from_name(matching_name)
     # Guard on token containment, not a suffix test: when the slug already names
     # the effort ("qwen3-8-max-0803", "…-non-reasoning-low-effort") appending it
     # again builds nonsense.
@@ -382,6 +392,13 @@ def match_aa_model(
             "slug_key": slug_key,
             "name_states_effort": name_states_effort,
             "slug_rung_skipped": bool(slug_key) and name_states_effort,
+            # Why `name_key` may differ from the verbatim name: AA's routing
+            # annotation was removed before keying. Recorded only when it applied.
+            **(
+                {"fallback_annotation_stripped": True}
+                if name is not None and matching_name != str(name)
+                else {}
+            ),
             # Reported separately, and only when each is true: `effort` when the
             # name stated a level, `effort_key_tried` only when the rung actually
             # consulted a key. A record whose slug already names the effort has

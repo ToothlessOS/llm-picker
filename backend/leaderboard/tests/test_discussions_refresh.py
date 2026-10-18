@@ -392,34 +392,35 @@ class TestRefreshHappyPath:
         assert all(not str(key).startswith("_") for key in hit)
 
 
+@pytest.fixture
+def anthropic() -> ProviderEntity:
+    """A vocabulary of exactly one vendor, so the assertions mean something.
+
+    The seeded vocabulary is removed first. It ships with the migration, so a
+    test that did not clear it would be asserting against 57 aliases whose
+    contents are not this file's business -- and a change to the seed would
+    silently change the expected tag counts here.
+    """
+    ProviderAlias.objects.all().delete()
+    ProviderEntity.objects.all().delete()
+
+    vendor = ProviderEntity.objects.create(
+        slug="anthropic",
+        label="Anthropic",
+        kind=EntityKind.VENDOR,
+        lmarena_organization="anthropic",
+    )
+    ProviderAlias.objects.create(
+        entity=vendor, alias_text="Anthropic", alias_key="anthropic", match_mode=MatchMode.WORD
+    )
+    ProviderAlias.objects.create(
+        entity=vendor, alias_text="Claude", alias_key="claude", match_mode=MatchMode.TOKEN_PREFIX
+    )
+    return vendor
+
+
 @pytest.mark.django_db
 class TestTagging:
-    @pytest.fixture
-    def anthropic(self) -> ProviderEntity:
-        """A vocabulary of exactly one vendor, so the assertions mean something.
-
-        The seeded vocabulary is removed first. It ships with the migration, so a
-        test that did not clear it would be asserting against 57 aliases whose
-        contents are not this file's business -- and a change to the seed would
-        silently change the expected tag counts here.
-        """
-        ProviderAlias.objects.all().delete()
-        ProviderEntity.objects.all().delete()
-
-        vendor = ProviderEntity.objects.create(
-            slug="anthropic",
-            label="Anthropic",
-            kind=EntityKind.VENDOR,
-            lmarena_organization="anthropic",
-        )
-        ProviderAlias.objects.create(
-            entity=vendor, alias_text="Anthropic", alias_key="anthropic", match_mode=MatchMode.WORD
-        )
-        ProviderAlias.objects.create(
-            entity=vendor, alias_text="Claude", alias_key="claude", match_mode=MatchMode.TOKEN_PREFIX
-        )
-        return vendor
-
     def test_tags_from_the_title(self, anthropic):
         client = FakeHNClient(window_hits=[story(11, "Anthropic ships something")], items={11: tree(11)})
 
@@ -563,6 +564,180 @@ class TestTagging:
         run(client)
 
         assert DiscussionTag.objects.get(thread__hn_id=11).matched_text == "Anthropic Claude"
+
+
+def stored_thread(hn_id: int, **overrides) -> HNThread:
+    """A thread already in the bank, without spending a refresh to create it."""
+    posted = NOW - timedelta(days=1)
+    fields = {
+        "title": "Stored thread",
+        "posted_at": posted,
+        "first_seen_at": posted,
+        "last_synced_at": posted,
+        "fetched_at": posted,
+        "comments_stored": 1,
+        # Above the sweep floor, so the prune is never the thing under test.
+        "points": 500,
+        "num_comments": 100,
+    }
+    fields.update(overrides)
+    return HNThread.objects.create(hn_id=hn_id, **fields)
+
+
+def stored_comment(thread: HNThread, hn_id: int, **overrides) -> HNComment:
+    seen = NOW - timedelta(days=2)
+    fields = {
+        "thread": thread,
+        "hn_id": hn_id,
+        "path": "000000",
+        "first_seen_at": seen,
+        "last_synced_at": seen,
+    }
+    fields.update(overrides)
+    return HNComment.objects.create(**fields)
+
+
+@pytest.mark.django_db
+class TestCommentsMovedBetweenStories:
+    """Hacker News merges duplicate stories and reassigns their comments.
+
+    A comment can therefore appear in a tree whose thread is not the one holding
+    its row. `hn_id` is globally unique, so treating it as new raises
+    `UNIQUE constraint failed: leaderboard_hncomment.hn_id` and -- because the
+    whole write phase shares one transaction -- fails the entire run.
+    """
+
+    def test_a_comment_stored_under_another_thread_is_moved_not_reinserted(self):
+        old = stored_thread(101)
+        original = stored_comment(old, 500, text_plain="old")
+        pk, first_seen = original.pk, original.first_seen_at
+
+        result = run(
+            FakeHNClient(
+                window_hits=[story(102, "LLM thread")],
+                items={102: tree(102, children=[hn_comment(500, text="new")])},
+            )
+        )
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.error_message == ""
+        assert result.summary["comments_created"] == 0
+        assert result.summary["comments_updated"] == 1
+        assert result.summary["comments_reassigned"] == 1
+
+        moved = HNComment.objects.get(hn_id=500)
+        assert moved.pk == pk
+        assert moved.first_seen_at == first_seen
+        assert moved.thread.hn_id == 102
+        assert moved.text_plain == "new"
+        assert not HNComment.objects.filter(thread=old).exists()
+
+    def test_a_moved_comment_loses_its_old_thread_tags_and_gains_the_new_threads(
+        self, anthropic
+    ):
+        old = stored_thread(101)
+        comment = stored_comment(
+            old, 500, text_html="<p>Claude</p>", text_plain="Claude"
+        )
+        DiscussionTag.objects.create(
+            thread=old,
+            comment=comment,
+            entity=anthropic,
+            matched_text="Claude",
+            match_mode=MatchMode.TOKEN_PREFIX,
+            mentions=1,
+            first_seen_at=NOW,
+            last_synced_at=NOW,
+        )
+
+        run(
+            FakeHNClient(
+                window_hits=[story(102, "LLM thread")],
+                items={102: tree(102, children=[hn_comment(500, text="Claude")])},
+            )
+        )
+
+        row = HNComment.objects.get(hn_id=500)
+        tags = list(DiscussionTag.objects.filter(comment=row).select_related("thread"))
+        assert [tag.thread.hn_id for tag in tags] == [102]
+        assert not DiscussionTag.objects.filter(thread=old, comment__isnull=False).exists()
+
+    def test_a_duplicate_comment_id_in_one_tree_is_stored_once(self):
+        result = run(
+            FakeHNClient(
+                window_hits=[story(11, "LLM")],
+                items={
+                    11: tree(
+                        11,
+                        children=[
+                            hn_comment(21, text="first"),
+                            hn_comment(21, text="second"),
+                        ],
+                    )
+                },
+            )
+        )
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert HNComment.objects.filter(hn_id=21).count() == 1
+        assert HNComment.objects.get(hn_id=21).text_plain == "first"
+        assert result.summary["comments_stored"] == 1
+        assert result.summary["comments_created"] == 1
+
+    def test_a_duplicated_id_owned_by_another_thread_is_moved_once(self):
+        old = stored_thread(101)
+        stored_comment(old, 500)
+
+        run(
+            FakeHNClient(
+                window_hits=[story(102, "LLM thread")],
+                items={102: tree(102, children=[hn_comment(500), hn_comment(500)])},
+            )
+        )
+
+        assert HNComment.objects.filter(hn_id=500).count() == 1
+        assert HNComment.objects.get(hn_id=500).thread.hn_id == 102
+
+    def test_a_moved_parent_is_visible_when_reparenting_its_moved_child(self):
+        """The reassignment has to be flushed before the parent map is re-read,
+        or the child's FK is silently nulled during the move."""
+        old = stored_thread(101)
+        parent = stored_comment(old, 500)
+        stored_comment(
+            old,
+            501,
+            path="000000.000000",
+            depth=1,
+            parent=parent,
+            parent_hn_id=500,
+        )
+
+        run(
+            FakeHNClient(
+                window_hits=[story(102, "LLM thread")],
+                items={102: tree(102, children=[hn_comment(500, children=[hn_comment(501)])])},
+            )
+        )
+
+        assert HNComment.objects.get(hn_id=500).thread.hn_id == 102
+        child = HNComment.objects.get(hn_id=501)
+        assert child.thread.hn_id == 102
+        assert child.parent_id == parent.pk
+
+    def test_a_comment_moved_out_of_a_pruned_thread_survives(self):
+        old = stored_thread(101, points=1, num_comments=1)
+        stored_comment(old, 500)
+
+        result = run(
+            FakeHNClient(
+                window_hits=[story(102, "LLM thread")],
+                items={102: tree(102, children=[hn_comment(500)])},
+            )
+        )
+
+        assert result.summary["threads_pruned"] >= 1
+        assert not HNThread.objects.filter(hn_id=101).exists()
+        assert HNComment.objects.get(hn_id=500).thread.hn_id == 102
 
 
 @pytest.mark.django_db

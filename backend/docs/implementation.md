@@ -24,7 +24,7 @@ tasks → services → clients + validation + matching + persistence → models
 |---|---|
 | `models.py` | 12 models. Latest-only: one current row per entity, upserted per refresh. The five Hacker News tables are the one exception to "latest-only" in spirit -- see [discussions](#hacker-news-discussions). |
 | `constants.py` | `TextChoices` enums, ordering whitelists, category→metric-kind map. |
-| `normalization.py` | `normalize_model_key()`, `harness_fold()`. |
+| `normalization.py` | `normalize_model_key()`, `strip_fallback_annotation()`, `harness_fold()`. |
 | `matching.py` | The deterministic match ladder — pure, no DB access except an injected alias table. |
 | `validation.py` | `parse_aa_model()`, `parse_lmarena_row()`, `REQUIRED_COLUMNS`. Pure. |
 | `persistence.py` | Every database write. Run bookkeeping, upserts, deactivation, the unmatched ledger. |
@@ -127,6 +127,14 @@ rung tries the bare `claude-opus-5` — which LMArena does not publish. The rung
 appends the level AA stated, producing a key strictly *more specific* than the
 slug, so unlike the fold it cannot reach a different effort level and needs no
 sibling check.
+
+AA also appends a routing annotation to some names — `"Claude Opus 5.5 (Max,
+Default Fallback)"` for the row LMArena calls `"Claude Opus 5.5 (Max)"`. That
+clause is provenance, not identity, so `strip_fallback_annotation()` removes it
+before normalization. Besides letting the exact-name rung resolve the row, this
+makes the stated effort visible to `has_effort_marker`, which closes the bare-slug
+rung — the annotation previously hid the level and left a wrong-level match
+possible. See [data-sources.md](data-sources.md#aas-fallback-annotation-is-not-identity).
 
 ### Reasoning effort is never folded
 

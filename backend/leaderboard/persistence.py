@@ -19,6 +19,7 @@ The "don't destroy the last good data" rules are enforced at this layer:
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -41,6 +42,8 @@ from .models import (
     UnmatchedRecord,
 )
 from .validation import ParsedAAModel, ParsedLMArenaRow
+
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
@@ -725,6 +728,10 @@ class CommentWriteStats:
     created: int = 0
     updated: int = 0
     unchanged: int = 0
+    #: Comments HN moved from another story into this thread. Orthogonal to the
+    #: content counters: a reassigned row also counts as `updated`, because its
+    #: ownership changed.
+    reassigned: int = 0
 
 
 def upsert_hn_comments(
@@ -747,18 +754,46 @@ def upsert_hn_comments(
     queue behind it. This loads the thread's rows in one query, diffs in memory,
     and writes in two statements.
 
+    Identity is resolved **globally**, not per thread: `hn_id` is unique across
+    the table, and Hacker News reassigns comments between stories when duplicate
+    submissions are merged. A row stored under the old thread would therefore be
+    invisible to a thread-scoped lookup and the insert would violate the unique
+    index. Finding it and moving it to `thread` is the correct reading -- the
+    fetched tree is authoritative about where a comment belongs now -- and it
+    keeps the row's pk and `first_seen_at`. The old thread's tags are deleted
+    because they describe an ownership that no longer holds; the new thread's
+    tags are rebuilt by `replace_comment_tags` immediately afterwards.
+
     Parents are resolved in a second pass because a `bulk_create` is the only
     point at which the new rows have primary keys. `parent_hn_id` is written in the
     first pass and is what the API actually serves; the FK is integrity, not the
-    read path.
+    read path. The reassigning update is flushed before that pass re-reads the pk
+    map, or a moved parent would be missing and its child's FK silently nulled.
     """
-    existing = {row.hn_id: row for row in HNComment.objects.filter(thread=thread)}
+    # `bulk_create` must never receive two objects with one globally-unique
+    # `hn_id`. `parse_item_tree` already normalizes the tree; this is the
+    # boundary's own guard, so a hand-built sequence cannot crash the run either.
+    unique: dict[int, ParsedComment] = {}
+    for item in comments:
+        unique.setdefault(item.hn_id, item)
+    items = tuple(unique.values())
+    ids = list(unique)
+
+    stored = (
+        {row.hn_id: row for row in HNComment.objects.filter(hn_id__in=ids)}
+        if ids
+        else {}
+    )
+    existing = {
+        hn_id: row for hn_id, row in stored.items() if row.thread_id == thread.pk
+    }
     stats = CommentWriteStats(rows=dict(existing))
 
     created: list[HNComment] = []
     touched: list[HNComment] = []
+    moved: list[HNComment] = []
 
-    for item in comments:
+    for item in items:
         values: dict[str, Any] = {
             "parent_hn_id": item.parent_hn_id,
             "depth": item.depth,
@@ -772,7 +807,7 @@ def upsert_hn_comments(
             "points": item.points,
             "posted_at": item.posted_at,
         }
-        row = existing.get(item.hn_id)
+        row = stored.get(item.hn_id)
 
         if row is None:
             row = HNComment(
@@ -787,6 +822,26 @@ def upsert_hn_comments(
             stats.created += 1
             continue
 
+        if row.thread_id != thread.pk:
+            # HN moved this comment to the story whose tree we just fetched.
+            # Ownership changed, so it counts as an update rather than an
+            # unchanged row; `reassigned` keeps the move visible on its own.
+            previous_thread_id = row.thread_id
+            row.thread = thread
+            _apply(row, values)
+            row.last_synced_at = synced_at
+            moved.append(row)
+            stats.rows[item.hn_id] = row
+            stats.updated += 1
+            stats.reassigned += 1
+            logger.warning(
+                "Hacker News comment %s moved from thread %s to thread %s",
+                item.hn_id,
+                previous_thread_id,
+                thread.pk,
+            )
+            continue
+
         changed = _apply(row, values)
         row.last_synced_at = synced_at
         touched.append(row)
@@ -794,27 +849,6 @@ def upsert_hn_comments(
             stats.updated += 1
         else:
             stats.unchanged += 1
-
-    if created:
-        HNComment.objects.bulk_create(created)
-
-    # `parent_hn_id` arrived with the payload, so the FK is derived from data we
-    # already hold. Read the mapping back rather than relying on `bulk_create`
-    # populating pks, which is backend-dependent.
-    pk_by_hn_id = dict(
-        HNComment.objects.filter(thread=thread).values_list("hn_id", "pk")
-    )
-    re_parented: list[HNComment] = []
-    for item in comments:
-        row = stats.rows.get(item.hn_id)
-        if row is None:  # pragma: no cover -- every parsed comment is in the map
-            continue
-        desired = (
-            pk_by_hn_id.get(item.parent_hn_id) if item.parent_hn_id is not None else None
-        )
-        if row.parent_id != desired:
-            row.parent_id = desired
-            re_parented.append(row)
 
     value_fields = [
         "parent_hn_id",
@@ -829,8 +863,41 @@ def upsert_hn_comments(
         "points",
         "posted_at",
     ]
+
+    if created:
+        HNComment.objects.bulk_create(created)
+    if moved:
+        # Flush the reassignment before the pk map is re-read below, or a moved
+        # parent would not be found and its child's FK would be nulled.
+        HNComment.objects.bulk_update(
+            moved, [*value_fields, "last_synced_at", "thread_id"]
+        )
+        # The old thread no longer owns these comments, so tags describing that
+        # ownership are stale. Title-level tags have `comment=NULL` and survive.
+        DiscussionTag.objects.filter(
+            comment_id__in=[row.pk for row in moved]
+        ).delete()
     if touched:
         HNComment.objects.bulk_update(touched, [*value_fields, "last_synced_at"])
+
+    # `parent_hn_id` arrived with the payload, so the FK is derived from data we
+    # already hold. Read the mapping back rather than relying on `bulk_create`
+    # populating pks, which is backend-dependent.
+    pk_by_hn_id = dict(
+        HNComment.objects.filter(thread=thread).values_list("hn_id", "pk")
+    )
+    re_parented: list[HNComment] = []
+    for item in items:
+        row = stats.rows.get(item.hn_id)
+        if row is None:  # pragma: no cover -- every parsed comment is in the map
+            continue
+        desired = (
+            pk_by_hn_id.get(item.parent_hn_id) if item.parent_hn_id is not None else None
+        )
+        if row.parent_id != desired:
+            row.parent_id = desired
+            re_parented.append(row)
+
     if re_parented:
         HNComment.objects.bulk_update(re_parented, ["parent_id"])
 

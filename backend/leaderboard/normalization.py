@@ -7,7 +7,9 @@ their own**, and neither does LMArena against Artificial Analysis:
 * LMArena `document` / `search` / `webdev` use slugs -- ``claude-opus-5-high``.
 * Artificial Analysis uses a ``name`` that may or may not name a reasoning level
   (``"GPT-5.5 (xhigh)"``) alongside a ``slug`` that may name a *different* one
-  (``gpt-5-5``).
+  (``gpt-5-5``). It also appends a routing annotation to some names
+  (``"Claude Opus 5.5 (Max, Default Fallback)"``), which `strip_fallback_annotation`
+  removes before keying.
 
 Exact string comparison across any of those pairs yields a **zero** intersection.
 Everything here is a pure function of its input: no fuzzy scoring, no similarity
@@ -16,7 +18,8 @@ thresholds, no external state.
 Two of the readers below look for a reasoning effort and must not be confused:
 `has_effort_marker` answers "is AA's bare slug unsafe to consult?" and is blind to
 AA's verbose prose on purpose; `effort_from_name` answers "which level does the
-name state?" and is the one that reads the prose.
+name state?" and is the one that reads the prose. `strip_fallback_annotation` is
+a third, unrelated reader: it removes AA's routing provenance, not an effort.
 """
 
 from __future__ import annotations
@@ -29,6 +32,16 @@ from .constants import EFFORT_TOKENS, HARNESS_SUFFIXES
 #: Every run of characters that is not a lowercase ASCII letter or digit becomes
 #: a single hyphen. Applied *after* case folding, so this is the whole alphabet.
 _NON_ALNUM_RUN = re.compile(r"[^a-z0-9]+")
+
+#: AA appends a routing annotation as the last comma-separated clause of the
+#: final parenthetical: ``"(Max, Default Fallback)"``, ``"(Max, Opus 4.8
+#: Fallback)"``. The clause must end with ``Fallback``; the lookbehind refuses an
+#: empty clause (``"(, Default Fallback)"``), and the character class refuses
+#: nested parentheses and commas. Anchored at the end of the name, so only a
+#: trailing annotation is touched.
+_FALLBACK_ANNOTATION = re.compile(
+    r"(?<=[^,()\s])\s*,\s*[^,()]*\bFallback\s*\)\s*$", re.IGNORECASE
+)
 
 
 def normalize_model_key(value: object) -> str:
@@ -121,6 +134,35 @@ def effort_from_name(name: object) -> str | None:
         if tokens[index + 1] == "effort" and tokens[index] in EFFORT_TOKENS:
             return tokens[index]
     return None
+
+
+def strip_fallback_annotation(value: object) -> str:
+    """Remove AA's trailing routing annotation from a display name.
+
+    Artificial Analysis annotates some rows with the model that backs them up,
+    inside the same parenthetical that carries the effort level::
+
+        "Claude Opus 5.5 (Max, Default Fallback)"      -> "Claude Opus 5.5 (Max)"
+        "Claude Fable 5 (Max, Opus 4.8 Fallback)"      -> "Claude Fable 5 (Max)"
+
+    The clause is **provenance, not identity**. LMArena publishes the same rows
+    without it (``"Claude Opus 5.5 (Max)"``), and leaving it in the name key makes
+    the exact rungs miss while hiding the stated effort from
+    `has_effort_marker`. It is removed before normalization, never from the
+    stored name, the slug, or an LMArena name.
+
+    Deliberately narrow: only the final parenthetical is examined, exactly one
+    comma-separated clause is removed, and that clause must **end** with the
+    word ``Fallback``. Everything else is returned unchanged rather than
+    repaired -- ``"(, Default Fallback)"``, ``"(Max, Default Fallback
+    Routing)"``, nested parentheses and plural ``Fallbacks`` all survive.
+
+    This is not an effort fold: it removes an annotation, never an effort level,
+    so it cannot move a record across levels.
+    """
+    if value is None:
+        return ""
+    return _FALLBACK_ANNOTATION.sub(")", str(value))
 
 
 def harness_fold(model_key: str) -> tuple[str, str] | None:

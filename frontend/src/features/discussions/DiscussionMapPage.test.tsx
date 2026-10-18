@@ -318,6 +318,27 @@ describe('DiscussionMapPage', () => {
     expect(row(1)?.classList.contains('is-reading')).toBe(false)
   })
 
+  it('points at a clicked block instead of the stale reading position', async () => {
+    // A leaf focus has no replies, so the reader's observer never reports a
+    // replacement: before the fix, `readingId` stayed on the previous block.
+    respond(THREE_ROOTS)
+    renderPage()
+    await waitForThread('beta')
+
+    act(() => IntersectionObserverStub.latest?.enter(articleFor(2)))
+    await waitFor(() => {
+      expect(row(2)?.classList.contains('is-reading')).toBe(true)
+    })
+
+    fireEvent.click(row(3) as HTMLElement)
+
+    await waitFor(() => {
+      expect(row(3)?.classList.contains('is-reading')).toBe(true)
+    })
+    expect(row(3)?.classList.contains('is-focus')).toBe(true)
+    expect(row(2)?.classList.contains('is-reading')).toBe(false)
+  })
+
   it('pins the focused branch above the replies rather than over them', async () => {
     // The bug this replaces: the pinned block was `position: sticky` *inside* the
     // scrolling region, so the replies slid underneath it and were painted behind

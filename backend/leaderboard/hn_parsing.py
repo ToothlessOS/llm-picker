@@ -94,11 +94,13 @@ class ParsedTree:
 
     comments: tuple[ParsedComment, ...]
     max_depth: int
-    #: True when the upstream tree carried more comments than the cap allowed.
+    #: True when the upstream tree carried more nodes than we stored -- the cap,
+    #: a node with no usable id, or a repeated id (the first occurrence is kept).
     #: Recorded on the thread so a truncated discussion never reads as a complete
     #: one.
     truncated: bool
-    #: How many comments the full tree held, before the cap.
+    #: How many nodes the full tree held, before the cap and before duplicate ids
+    #: were collapsed.
     total_nodes: int
     #: Diagnostics kept in `HNThread.raw_payload` -- the story's own fields and the
     #: set of keys observed on comment nodes. Small, and the thing that makes a
@@ -242,6 +244,12 @@ def parse_item_tree(
 
     The story node itself is not returned as a comment; its fields are echoed in
     `skeleton` for drift forensics.
+
+    Comment ids are globally unique, so a payload that repeats one (malformed or
+    transient upstream data) keeps its **first** breadth-first occurrence and
+    drops the rest. Two `ParsedComment`s with one `hn_id` would make the comment
+    upsert collide with the unique index, and would put the same comment at two
+    positions in the stored tree.
     """
     payload = require_mapping(raw, what="Hacker News item")
     if max_stored_comments < 1:
@@ -256,6 +264,7 @@ def parse_item_tree(
 
     comments: list[ParsedComment] = []
     comment_keys: set[str] = set()
+    seen_ids: set[int] = set()
     max_depth = 0
     cursor = 0
 
@@ -272,10 +281,18 @@ def parse_item_tree(
         if len(comments) >= max_stored_comments or _is_skipped(node):
             continue
 
+        node_id = _node_id(node)
+        # The first occurrence is canonical. A duplicate's children are not
+        # enqueued: the first copy already queued them, and re-walking them would
+        # let one sub-thread sit at two paths -- or, with a self-referential
+        # payload, keep growing the queue forever.
+        if node_id in seen_ids:
+            continue
+        seen_ids.add(node_id)
+
         comments.append(_parse_comment(node, parent_hn_id, depth, sibling_index, parent_path))
         max_depth = max(max_depth, depth)
 
-        node_id = _node_id(node)
         node_path = _path(parent_path, sibling_index)
         for index, child in enumerate(_children(node)):
             queue.append((child, node_id, depth + 1, index, node_path))

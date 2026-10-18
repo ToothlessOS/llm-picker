@@ -717,6 +717,78 @@ class TestMatchingPersisted:
             reason=UnmatchedReason.NO_LMARENA_MATCH.value,
         ).exists()
 
+    def test_a_default_fallback_aa_row_joins_the_max_agent_entry(self):
+        """The live Opus 5.5 shape: AA names it `(Max, Default Fallback)`, LMArena
+        `(Max)`. The fallback clause is provenance, so the join must form and the
+        AA row must become retained (and therefore visible on the default AA and
+        overview surfaces)."""
+        refresh.refresh_lmarena(
+            client=with_categories(agent=[agent_row("Claude Opus 5.5 (Max)")]),
+            use_lock=False,
+        )
+
+        run = refresh.refresh_aa(
+            client=aa_client(
+                aa_page(
+                    [
+                        aa_model(
+                            "2f3c4dc9-a450-4303-8697-0237257cf08f",
+                            "claude-opus-5-5",
+                            "Claude Opus 5.5 (Max, Default Fallback)",
+                        )
+                    ]
+                )
+            ),
+            use_lock=False,
+        )
+
+        assert run.summary["matched"] == 1
+        match = ModelMatch.objects.get()
+        assert match.match_method == MatchMethod.EXACT_NAME.value
+        assert match.matched_key == "claude-opus-5-5-max"
+        assert match.confidence == 1.0
+        assert match.model.is_retained is True
+        # The stored identity stays verbatim; only matching uses the cleaned name.
+        assert match.model.name == "Claude Opus 5.5 (Max, Default Fallback)"
+        assert not UnmatchedRecord.objects.filter(is_current=True).exists()
+
+    def test_a_fallback_row_that_stays_unmatched_keeps_its_raw_ledger_key(self):
+        """Cleaning the name is a matching concern, not a ledger re-identification.
+
+        AA publishes Fable 5 at Max; LMArena's agent entry is High, so the row
+        must still be reported -- under the verbatim spelling a reviewer copies
+        into an alias.
+        """
+        refresh.refresh_lmarena(
+            client=with_categories(agent=[agent_row("Claude Fable 5 (High)")]),
+            use_lock=False,
+        )
+
+        refresh.refresh_aa(
+            client=aa_client(
+                aa_page(
+                    [
+                        aa_model(
+                            "uuid-fable",
+                            "claude-fable-5",
+                            "Claude Fable 5 (Max, Opus 4.8 Fallback)",
+                        )
+                    ]
+                )
+            ),
+            use_lock=False,
+        )
+
+        record = UnmatchedRecord.objects.get(
+            source=Source.ARTIFICIAL_ANALYSIS.value,
+            reason=UnmatchedReason.NO_LMARENA_MATCH.value,
+        )
+        assert record.model_key == "claude-fable-5-max-opus-4-8-fallback"
+        assert record.model_name == "Claude Fable 5 (Max, Opus 4.8 Fallback)"
+        assert record.detail["name_key"] == "claude-fable-5-max"
+        assert record.detail["name_states_effort"] is True
+        assert record.detail["slug_rung_skipped"] is True
+
 
 # --------------------------------------------------------------------------- #
 # The agent-side ledger: the population the completeness rule drops

@@ -17,6 +17,7 @@ from leaderboard.normalization import (
     harness_fold,
     has_effort_marker,
     normalize_model_key,
+    strip_fallback_annotation,
 )
 from leaderboard.tests.factories import agent_index
 
@@ -216,6 +217,69 @@ class TestEffortFromName:
         `test_matching.TestAaStatedEffortSlugRung::test_a_product_name_containing_an_effort_word_does_not_construct_a_key`.
         """
         assert effort_from_name("Qwen3.8 Max") == "max"
+
+
+class TestStripFallbackAnnotation:
+    """AA appends a routing annotation to some names; it is not identity.
+
+    The live spellings are `"(Max, Default Fallback)"` and
+    `"(Max, Opus 4.8 Fallback)"`. LMArena names the same rows without the clause,
+    so it is removed before keying. The raw name is still what the API displays
+    and what `ModelAlias.raw_name` must match.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            # The live rows, verbatim.
+            ("Claude Opus 5.5 (Max, Default Fallback)", "Claude Opus 5.5 (Max)"),
+            ("Claude Fable 5 (Max, Opus 4.8 Fallback)", "Claude Fable 5 (Max)"),
+            (
+                "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)",
+                "Claude Fable 5.1 (Adaptive Reasoning, Max Effort)",
+            ),
+            ("Claude Fable 5.1 (Low, Default Fallback)", "Claude Fable 5.1 (Low)"),
+            # Case-insensitive; only the final clause goes.
+            ("Model (Max, default FALLBACK)", "Model (Max)"),
+            ("Model (X, Y, Default Fallback)", "Model (X, Y)"),
+            # A trailing whitespace after the closing parenthesis is fine.
+            ("Model (Max, Default Fallback)  ", "Model (Max)"),
+            # Everything else is refused rather than repaired.
+            ("Model (Max)", "Model (Max)"),
+            ("Model (Default Fallback)", "Model (Default Fallback)"),
+            ("Model, Default Fallback", "Model, Default Fallback"),
+            ("Model (Max, Default Fallback) (Beta)", "Model (Max, Default Fallback) (Beta)"),
+            # The clause must end with "Fallback".
+            ("Model (Max, Default Fallback Routing)", "Model (Max, Default Fallback Routing)"),
+            ("Model (Max, Fallbacks)", "Model (Max, Fallbacks)"),
+            ("Model (Max, Foo (Bar) Fallback)", "Model (Max, Foo (Bar) Fallback)"),
+            ("Model (, Default Fallback)", "Model (, Default Fallback)"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_strips_only_a_trailing_fallback_clause(self, name, expected):
+        assert strip_fallback_annotation(name) == expected
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Claude Opus 5.5 (Max, Default Fallback)",
+            "Claude Fable 5 (Max, Opus 4.8 Fallback)",
+            "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)",
+        ],
+    )
+    def test_is_idempotent(self, name):
+        once = strip_fallback_annotation(name)
+        assert strip_fallback_annotation(once) == once
+
+    def test_the_cleaned_name_makes_the_effort_trailing(self):
+        """The raw name still states nothing (no word `Effort`); the cleaned one
+        ends in `(Max)`, which the trailing-parenthetical rule already reads."""
+        raw = "Some Model (Adaptive Reasoning, Max, Default Fallback)"
+
+        assert effort_from_name(raw) is None
+        assert effort_from_name(strip_fallback_annotation(raw)) == "max"
 
 
 class TestHarnessFold:

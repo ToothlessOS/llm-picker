@@ -575,6 +575,7 @@ def _execute(
     comments_created = 0
     comments_updated = 0
     comments_unchanged = 0
+    comments_reassigned = 0
     comments_stored = 0
 
     # Attached before the write phase so that a failure inside it still reports
@@ -609,6 +610,7 @@ def _execute(
             comments_created += written.created
             comments_updated += written.updated
             comments_unchanged += written.unchanged
+            comments_reassigned += written.reassigned
             comments_stored += len(tree.comments)
             store.replace_comment_tags(
                 thread,
@@ -646,6 +648,8 @@ def _execute(
     summary["comments_created"] = comments_created
     summary["comments_updated"] = comments_updated
     summary["comments_unchanged"] = comments_unchanged
+    # Comments HN moved here from another story. Orthogonal to `updated`.
+    summary["comments_reassigned"] = comments_reassigned
 
     return store.finish_run(
         run,

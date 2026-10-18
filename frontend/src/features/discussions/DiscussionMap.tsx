@@ -141,15 +141,25 @@ export function DiscussionMap({
     const viewHeight = element.clientHeight
     if (viewHeight === 0) return
 
+    // `.map-scroll` pads its content so the focus outline and search glow are
+    // not clipped. `row.y` is measured from the spacer inside that padding, so
+    // add it back before comparing against `scrollTop`.
+    const paddingTop =
+      Number.parseFloat(getComputedStyle(element).paddingTop) || 0
+    const rowTop = row.y + paddingTop
+
     const margin = Math.min(viewHeight * FOLLOW_MARGIN_RATIO, FOLLOW_MARGIN_MAX)
     const inside =
-      row.y >= viewTop + margin && row.y + row.height <= viewTop + viewHeight - margin
+      rowTop >= viewTop + margin &&
+      rowTop + row.height <= viewTop + viewHeight - margin
     if (inside) return
 
-    const centred = row.y + row.height / 2 - viewHeight / 2
+    const centred = rowTop + row.height / 2 - viewHeight / 2
     const furthest = element.scrollHeight - viewHeight
     element.scrollTop = Math.max(0, Math.min(centred, furthest))
-  }, [activeId, layout])
+    // `viewportHeight` is in the deps because the first run can see a zero-height
+    // pane; once `measure()` above reports the real height, this retries.
+  }, [activeId, layout, viewportHeight])
 
   const hueBySlug = useMemo(() => {
     const hues = new Map<string, string>()
