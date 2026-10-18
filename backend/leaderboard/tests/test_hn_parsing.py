@@ -238,6 +238,44 @@ class TestParseItemTree:
         assert tree.truncated is False
         assert tree.max_depth == 0
 
+    def test_a_duplicate_id_is_kept_once_at_its_first_breadth_first_position(self):
+        """The id is the upsert key, so a repeated node must not become two rows.
+
+        First occurrence wins, and dropping the later sibling leaves a gap in the
+        path sequence -- which is harmless, because `path` is an ordering, not a
+        dense index.
+        """
+        payload = hn_item(
+            1,
+            children=[
+                hn_comment(10, text="first"),
+                hn_comment(10, text="second"),
+                hn_comment(11),
+            ],
+        )
+
+        tree = parse_item_tree(payload, max_stored_comments=100)
+
+        assert [comment.hn_id for comment in tree.comments] == [10, 11]
+        assert tree.comments[0].text.text == "first"
+        assert [comment.sibling_index for comment in tree.comments] == [0, 2]
+
+    def test_a_duplicates_subtree_is_not_enqueued(self):
+        """Re-walking it could attach one sub-thread at two paths, or -- with a
+        self-referential payload -- keep growing the queue forever."""
+        payload = hn_item(
+            1,
+            children=[
+                hn_comment(10, text="first", children=[]),
+                hn_comment(10, text="second", children=[hn_comment(13)]),
+                hn_comment(11),
+            ],
+        )
+
+        tree = parse_item_tree(payload, max_stored_comments=100)
+
+        assert [comment.hn_id for comment in tree.comments] == [10, 11]
+
     def test_deep_nesting_does_not_exhaust_the_stack(self):
         """Hacker News threads nest deeply; a recursive walk is a crash risk."""
         node = hn_comment(1000)

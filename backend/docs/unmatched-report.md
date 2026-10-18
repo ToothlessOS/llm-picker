@@ -62,7 +62,13 @@ artificial_analysis   agent       no_lmarena_match          Agnes 2.5 Pro Beta  
 
 Detail:
   a-x-k2: {"name_key": "a-x-k2", "slug_key": "a-x-k2", "name_states_effort": false, "slug_rung_skipped": false}
-  claude-fable-5: {"name_key": "claude-fable-5-adaptive-reasoning-max-effort-opus-4-8-fallback", "slug_key": "claude-fable-5", "name_states_effort": false, "slug_rung_skipped": false, "effort": "max", "effort_key_tried": "claude-fable-5-max"}
+  claude-fable-5-max-opus-4-8-fallback: {"name_key": "claude-fable-5-max", "slug_key": "claude-fable-5", "name_states_effort": true, "slug_rung_skipped": true, "fallback_annotation_stripped": true, "effort": "max", "effort_key_tried": "claude-fable-5-max"}
+
+`model_name` and the ledger's `model_key` are the verbatim upstream spelling a
+reviewer copies into an alias. `detail.name_key` is the key the ladder actually
+tried: AA's routing annotation (`..., Opus 4.8 Fallback`) is stripped before
+normalization, so it can differ from `model_key`. Here the row is still unmatched
+because LMArena publishes Fable 5 at High, not Max.
 
 By reason:
      615  no_lmarena_match

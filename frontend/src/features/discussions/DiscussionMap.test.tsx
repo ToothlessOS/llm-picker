@@ -330,6 +330,41 @@ describe('DiscussionMap', () => {
     expect(screen.getByText('search hit')).toBeDefined()
   })
 
+  it('centres an off-band active row, allowing for the scroll padding', () => {
+    // jsdom does not expand the `padding-block` shorthand used by App.css, so
+    // spell out the longhands the component sees in a browser.
+    const style = document.createElement('style')
+    style.textContent =
+      '.map-scroll { padding-top: 12px; padding-bottom: 12px; }'
+    document.head.append(style)
+
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockReturnValue(200)
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockReturnValue(10_000)
+
+    try {
+      const layout = layoutOf(
+        Array.from({ length: 40 }, (_, index) => ({
+          id: index + 1,
+          text: 'x'.repeat(191),
+        })),
+      )
+      const target = layout.rows[30]
+
+      draw(layout, target.id)
+
+      const map = screen.getByTestId('discussion-map')
+      expect(map.scrollTop).toBe(target.y + 12 + target.height / 2 - 100)
+    } finally {
+      clientHeight.mockRestore()
+      scrollHeight.mockRestore()
+      style.remove()
+    }
+  })
+
   it('reports its own size, so the layout can be built for it', () => {
     const layout = layoutOf([{ id: 1, text: 'alpha' }])
 

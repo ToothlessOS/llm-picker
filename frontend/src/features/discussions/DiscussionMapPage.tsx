@@ -94,6 +94,17 @@ export function DiscussionMapPage() {
     [tree, state.comment],
   )
 
+  // A new focus starts a new reading session. Until the reader's observer
+  // re-subscribes, `readingId` still names a comment in the branch just left —
+  // and for a leaf focus it would never be replaced, because the reader has
+  // nothing to observe. Cleared during render, like the thread guard above, so
+  // the map never paints one frame aimed at the old row.
+  const [lastFocus, setLastFocus] = useState<number | null>(focusId)
+  if (lastFocus !== focusId) {
+    setLastFocus(focusId)
+    setReadingId(null)
+  }
+
   const depth = state.depth ?? defaultDepthMode(comments.length)
 
   const options = useMemo<MapOptions>(
@@ -225,7 +236,7 @@ export function DiscussionMapPage() {
               activeId={activeId}
               layout={layout}
               onFocus={(id) => focusComment(id)}
-              onGeometry={(width) => handleGeometry(width)}
+              onGeometry={handleGeometry}
               onToggle={handleToggle}
             />
           ) : null}

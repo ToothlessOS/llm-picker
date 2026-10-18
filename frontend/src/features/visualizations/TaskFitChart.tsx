@@ -136,7 +136,7 @@ function drawChart(
     options
   const interactive = variant === 'interactive'
   const tokens = readTokens(svgNode)
-  const compact = interactive && width < 720
+  const compact = interactive && width < 400
   const margin = interactive
     ? compact
       ? { top: 28, right: 8, bottom: 8, left: 12 }
@@ -195,7 +195,7 @@ function drawChart(
 
   const rowHeight = y.bandwidth()
   const showRank = interactive && rowHeight >= 13 && x.bandwidth() >= 22
-  const showNames = interactive && !compact && rowHeight >= 10
+  const showNames = interactive && !compact && rowHeight >= 6
   const nameSize = Math.max(8, Math.min(11, rowHeight - 2))
   const nameLimit = 22
 

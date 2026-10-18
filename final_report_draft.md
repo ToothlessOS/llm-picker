@@ -34,7 +34,7 @@ This sorted stacked bar chart explains the monetary side of the decision. Bar he
 
 ![Task Fit heatmap of LMArena category ranks](assets/final-report/task-fit.png)
 
-The heatmap asks which model fits a specific job. Rows are matched models, columns are Agent, Document, Search, and WebDev, cell labels are ranks, and darker teal means a stronger rank within that column. Users click a task heading or legend control to sort, hover for the raw score/rating and rank, and click a row to open its model card. Empty cells mean “not evaluated,” not zero. The latest cohort has complete Agent coverage (39/39) and broad WebDev coverage (35/39), but sparse Document (9/39) and Search (6/39) coverage. This missingness is itself an important finding: task-specific recommendations are much more defensible for Agent and WebDev than for Search.
+The heatmap asks which model fits a specific job. Rows are matched models, columns are Agent, Document, Search, and WebDev, cell labels are ranks, and darker teal means a stronger rank within that column. Users click a task heading or legend control to sort, hover for the raw score/rating and rank, and click a row to open its model card. Empty cells mean “not evaluated,” not zero. The latest cohort has complete Agent coverage (42/42) and broad WebDev coverage (37/42), but sparse Document (10/42) and Search (6/42) coverage. This missingness is itself an important finding: task-specific recommendations are much more defensible for Agent and WebDev than for Search.
 
 ### 4. Model Card
 

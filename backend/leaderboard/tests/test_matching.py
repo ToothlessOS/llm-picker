@@ -237,6 +237,85 @@ class TestAaStatedEffortSlugRung:
         assert [loser.method for loser, _ in losers] == [MatchMethod.EXACT_EFFORT_SLUG.value]
 
 
+class TestAaFallbackAnnotation:
+    """AA's trailing fallback clause is provenance, not identity.
+
+    The live row is `"Claude Opus 5.5 (Max, Default Fallback)"` with the bare
+    slug `claude-opus-5-5`; LMArena publishes it as `"Claude Opus 5.5 (Max)"`.
+    Before the annotation was understood, the name rung missed, the effort reader
+    was silent, and the bare-slug rung was open -- a latent wrong-level match.
+    """
+
+    def test_the_fallback_clause_is_stripped_before_the_name_rung(self):
+        index = agent_index("Claude Opus 5.5 (Max)")
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Opus 5.5 (Max, Default Fallback)",
+            slug="claude-opus-5-5",
+        )
+
+        assert outcome.is_match
+        assert outcome.method == MatchMethod.EXACT_NAME.value
+        assert outcome.matched_key == "claude-opus-5-5-max"
+
+    def test_the_bare_slug_rung_stays_closed_for_a_stated_effort(self):
+        """The never-guess guard: Max must not fall through to the base model.
+
+        Stripping the clause leaves a name ending in `Max`, so
+        `has_effort_marker` recognises it and the bare `claude-opus-5-5` slug is
+        never consulted. Only the constructed `...-max` key is tried.
+        """
+        index = agent_index("Claude Opus 5.5")  # base only
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Opus 5.5 (Max, Default Fallback)",
+            slug="claude-opus-5-5",
+        )
+
+        assert not outcome.is_match
+        assert outcome.detail["name_states_effort"] is True
+        assert outcome.detail["slug_rung_skipped"] is True
+        assert outcome.detail["effort_key_tried"] == "claude-opus-5-5-max"
+
+    def test_it_never_reaches_across_effort_levels(self):
+        """AA has Fable 5 at Max; LMArena's agent entry is High. Refuse."""
+        index = agent_index("Claude Fable 5 (High)")
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Fable 5 (Max, Opus 4.8 Fallback)",
+            slug="claude-fable-5",
+        )
+
+        assert not outcome.is_match
+        assert outcome.detail["effort"] == "max"
+        assert outcome.detail["effort_key_tried"] == "claude-fable-5-max"
+
+    def test_an_alias_is_still_keyed_on_the_verbatim_name(self):
+        """Reviewers copy the spelling the unmatched report shows, clause and all."""
+        index = agent_index("Claude Opus 5.5 (Max)", "Claude Opus 5.5 (High)")
+        table = AliasTable()
+        table.add(
+            Source.ARTIFICIAL_ANALYSIS.value,
+            "agent",
+            "Claude Opus 5.5 (Max, Default Fallback)",
+            "claude-opus-5-5-high",
+        )
+
+        outcome = match_aa_model(
+            index,
+            name="Claude Opus 5.5 (Max, Default Fallback)",
+            slug="claude-opus-5-5",
+            alias_table=table,
+        )
+
+        assert outcome.is_match
+        assert outcome.method == MatchMethod.ALIAS.value
+        assert outcome.matched_key == "claude-opus-5-5-high"
+
+
 class TestAaAntiFuzzy:
     """Near misses must not match. The whole point of dropping fuzzy scoring.
 

@@ -586,6 +586,10 @@ class HNComment(models.Model):
 
     Identity is `hn_id`. `path` is an **ordering**, derivable from the fetched tree
     and liable to change if HN ever reorders siblings -- so it is never the key.
+    `hn_id` is unique **globally**, not per thread, because Hacker News item ids
+    are global and HN can move a comment to another story when duplicate
+    submissions are merged. The ingest upsert therefore reassigns such a row to
+    its new thread rather than inserting a second one.
     """
 
     thread = models.ForeignKey(

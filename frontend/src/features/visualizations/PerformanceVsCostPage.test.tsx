@@ -182,6 +182,29 @@ describe('PerformanceVsCostPage', () => {
     expect(screen.getByTestId('AA Coding Index').getAttribute('data-pinned')).toBe('cheap-weak')
   })
 
+  it('clears the hover preview when the pointer leaves, but keeps a clicked model', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    const cheap = await screen.findByRole('button', { name: 'Pin Cheap weak' })
+    await user.hover(cheap)
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Cheap weak' })).toBeTruthy()
+    })
+
+    await user.unhover(cheap)
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'No model selected' })).toBeTruthy()
+    })
+
+    await user.click(cheap)
+    await user.unhover(cheap)
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Cheap weak' })).toBeTruthy()
+    })
+    expect(screen.getByTestId('AA Intelligence Index').getAttribute('data-pinned')).toBe('cheap-weak')
+  })
+
   it('restores the three scatter views and coordinates brushing across them', async () => {
     const user = userEvent.setup()
     renderPage()

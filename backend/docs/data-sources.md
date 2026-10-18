@@ -294,6 +294,33 @@ to reach across effort levels, which is also why it needs none of the fold's
 sibling shadowing check. It requires the word `Effort` to be present — a bare
 `(Adaptive Reasoning, Max)` mid-name states nothing and is refused.
 
+### AA's fallback annotation is not identity
+
+AA appends a routing annotation as the last clause of the effort parenthetical:
+
+| AA name | LMArena agent name |
+|---|---|
+| `Claude Opus 5.5 (Max, Default Fallback)` | `Claude Opus 5.5 (Max)` |
+| `Claude Fable 5 (Max, Opus 4.8 Fallback)` | — (LMArena has Fable 5 at High) |
+
+The clause says which model backs the row up; it is **provenance, not identity**,
+and LMArena names the same row without it. `strip_fallback_annotation` removes
+one such trailing clause **before** the name is normalized. It is deliberately
+narrow — only the final parenthetical, one comma-separated clause, ending in the
+word `Fallback`, no nested parentheses — and it is never applied to slugs,
+LMArena names, or the stored `LLMModel.name`.
+
+Two things follow, both wanted:
+
+* the exact-name rung can now resolve `claude-opus-5-5-max`; and
+* `has_effort_marker` sees the stated `Max`, so the bare-slug rung is **closed**.
+  Before the cleanup the annotation hid the effort, leaving AA's Max record free
+  to fall through to a bare `claude-opus-5-5` key — the same wrong-level trap the
+  rung order exists to prevent.
+
+Aliases and the unmatched ledger stay keyed on the verbatim upstream spelling, so
+a reviewer still copies exactly what the report shows.
+
 ### Rejected: folding reasoning effort
 
 An earlier design also folded reasoning-effort tokens (`xhigh`/`high`/`max`/…).

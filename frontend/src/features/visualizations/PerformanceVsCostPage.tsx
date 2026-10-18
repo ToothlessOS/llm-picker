@@ -113,10 +113,6 @@ export function PerformanceVsCostPage() {
       return next
     })
   }
-  const inspect = (key: string | null) => {
-    setHoverKey(key)
-    if (key) setInspectedKey(key)
-  }
   const togglePin = (key: string) => {
     setInspectedKey(key)
     setMessage(pinnedKeys.length === 3 && !pinnedKeys.includes(key)
@@ -273,7 +269,7 @@ export function PerformanceVsCostPage() {
                       scoreLabel={PERFORMANCE_LABELS[metric]} costLabel={SPEED_LABELS[speedMetric]}
                       costScale={speedMetric === 'ttft' ? 'log' : 'linear'} xDomain={speedComparison.xDomain}
                       providers={providers} hoverKey={hoverKey} pinnedKeys={pinnedKeys}
-                      brushedKeys={brushedKeys} onHover={inspect} onSelect={togglePin}
+                      brushedKeys={brushedKeys} onHover={setHoverKey} onSelect={togglePin}
                       brushMode={brushMode} brushReset={scatterBrushReset}
                       xBetter={speedMetric === 'output' ? 'higher' : 'lower'} showScale={false}
                       formatX={formatSpeedAxis}
@@ -288,8 +284,8 @@ export function PerformanceVsCostPage() {
                       <span className="performance-frontier__label">Pareto front</span>
                       {speedComparison.pareto.map((point) => <button key={point.key} type="button"
                         aria-pressed={pinnedKeys.includes(point.key)} onClick={() => togglePin(point.key)}
-                        onPointerEnter={() => inspect(point.key)} onPointerLeave={() => setHoverKey(null)}
-                        onFocus={() => inspect(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
+                        onPointerEnter={() => setHoverKey(point.key)} onPointerLeave={() => setHoverKey(null)}
+                        onFocus={() => setHoverKey(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
                     </div>
                   </> : <EmptyState message={`No measured ${PERFORMANCE_LABELS[metric]} and ${SPEED_LABELS[speedMetric]} pairs for this selection.`} />}
                 </section>
@@ -315,7 +311,7 @@ export function PerformanceVsCostPage() {
                     leadTitle={speedMetric === 'output' ? 'Output speed' : 'TTFT'} leadHint="faster ↑"
                     hoverKey={hoverKey} pinnedKeys={pinnedKeys}
                     brushedKeys={brushedKeys} brushReset={parallelBrushReset}
-                    onHover={inspect} onSelect={togglePin} onAxisBrush={brushAxis} />
+                    onHover={setHoverKey} onSelect={togglePin} onAxisBrush={brushAxis} />
                 </div>
               </section>
             </div> : <>
@@ -332,7 +328,7 @@ export function PerformanceVsCostPage() {
                         scoreLabel={PERFORMANCE_LABELS[item]} costLabel={costMetric === 'task' ? 'AA cost / Intelligence task (USD)' : COST_LABELS[costMetric]}
                         costScale={costScale} xDomain={comparison.xDomain} providers={providers}
                         hoverKey={hoverKey} pinnedKeys={pinnedKeys} brushedKeys={brushedKeys}
-                        onHover={inspect} onSelect={togglePin} brushMode={brushMode}
+                        onHover={setHoverKey} onSelect={togglePin} brushMode={brushMode}
                         brushReset={scatterBrushReset + viewBrushResets[item]}
                         onBrush={(keys) => {
                           setAxisBrushes({})
@@ -350,8 +346,8 @@ export function PerformanceVsCostPage() {
                         <span className="performance-frontier__label">Pareto front</span>
                         {model.pareto.map((point) => <button key={point.key} type="button"
                           aria-pressed={pinnedKeys.includes(point.key)} onClick={() => togglePin(point.key)}
-                          onPointerEnter={() => inspect(point.key)} onPointerLeave={() => setHoverKey(null)}
-                          onFocus={() => inspect(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
+                          onPointerEnter={() => setHoverKey(point.key)} onPointerLeave={() => setHoverKey(null)}
+                          onFocus={() => setHoverKey(point.key)} onBlur={() => setHoverKey(null)}>{point.name}</button>)}
                       </div>
                     </> : <EmptyState message={`No measured ${PERFORMANCE_LABELS[item]} and cost pairs for this selection.`} />}
                   </section>
@@ -375,7 +371,7 @@ export function PerformanceVsCostPage() {
                   <ParallelCoordinatesChart records={records} costScale={costScale} costDomain={comparison.xDomain}
                     costLabel={COST_LABELS[costMetric]} hoverKey={hoverKey} pinnedKeys={pinnedKeys}
                     brushedKeys={brushedKeys} brushReset={parallelBrushReset}
-                    onHover={inspect} onSelect={togglePin} onAxisBrush={brushAxis} />
+                    onHover={setHoverKey} onSelect={togglePin} onAxisBrush={brushAxis} />
                 </div>
               </section>
             </div>
@@ -431,8 +427,8 @@ export function PerformanceVsCostPage() {
                 {listedRows.map((row) => <button type="button" key={row.model.key}
                   aria-label={`Pin ${row.model.name}`} aria-pressed={pinnedKeys.includes(row.model.key)}
                   onClick={() => togglePin(row.model.key)}
-                  onPointerEnter={() => inspect(row.model.key)} onPointerLeave={() => setHoverKey(null)}
-                  onFocus={() => inspect(row.model.key)} onBlur={() => setHoverKey(null)}>
+                  onPointerEnter={() => setHoverKey(row.model.key)} onPointerLeave={() => setHoverKey(null)}
+                  onFocus={() => setHoverKey(row.model.key)} onBlur={() => setHoverKey(null)}>
                   <span className="performance-swatch" style={{ background: providerColor(row.model.organization ?? 'unknown', providers) }} />
                   <span>{row.model.name}<small>{providerLabel(row.model.organization)}</small></span>
                   {pinnedKeys.includes(row.model.key) ? <Pin size={13} /> : null}
