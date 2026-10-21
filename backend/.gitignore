@@ -18,3 +18,4 @@ media
 db.sqlite3
 *.log
 README.md
+.DS_Store

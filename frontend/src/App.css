@@ -2218,9 +2218,9 @@ button.pareto-front-link {
   margin: 0 auto;
   padding: 18px 24px 28px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .app-footer p,
@@ -2244,6 +2244,49 @@ button.pareto-front-link {
 
 .app-footer a:hover {
   color: var(--color-accent);
+}
+
+.app-footer p.app-footer__note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  font-weight: 450;
+  letter-spacing: 0;
+  line-height: 1.5;
+  text-align: left;
+  text-transform: none;
+}
+
+.app-footer p.app-footer__note a {
+  color: var(--color-text);
+  font-size: inherit;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  text-underline-offset: 3px;
+}
+
+.app-footer p.app-footer__note a:hover,
+.app-footer p.app-footer__note a:focus-visible {
+  color: var(--color-accent);
+  text-decoration-color: var(--color-accent);
+}
+
+.app-footer p.app-footer__note em {
+  color: var(--color-accent);
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.app-footer p.app-footer__note svg {
+  margin-right: 3px;
+  vertical-align: -1px;
 }
 
 .page--state {
