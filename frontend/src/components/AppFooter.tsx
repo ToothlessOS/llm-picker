@@ -1,3 +1,5 @@
+import { Star } from 'lucide-react'
+
 import type { MetadataResponse } from '../api'
 
 interface AppFooterProps {
@@ -21,17 +23,14 @@ export function AppFooter({ metadata }: AppFooterProps) {
           )}
           <span aria-hidden="true">·</span>
           {attribution?.artificial_analysis ? (
-            <a
-              href={attribution.artificial_analysis}
-              rel="noreferrer"
-              target="_blank"
-            >
+            <a href={attribution.artificial_analysis} rel="noreferrer" target="_blank">
               Artificial Analysis
             </a>
           ) : (
             <span>Artificial Analysis</span>
           )}
         </nav>
+        <p className="app-footer__note">{'Come poke around on '}<a href="https://github.com/ToothlessOS/llm-picker" rel="noreferrer" target="_blank">GitHub</a>{', a little '}<em><Star aria-hidden="true" size={13} />star</em>{' would make our day.'}</p>
       </div>
     </footer>
   )
